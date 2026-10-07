@@ -795,14 +795,99 @@ fn quick_prompts(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     });
 }
 
+fn percent(value: f64) -> String {
+    format!("{}%", (value * 100.0).round() as i64)
+}
+
+fn signed(value: f64) -> String {
+    let rounded = (value * 10.0).round() / 10.0;
+    let number = if (rounded - rounded.round()).abs() < 1e-9 { format!("{}", rounded as i64) } else { format!("{rounded:.1}") };
+    if rounded > 0.0 { format!("+{number}") } else { number }
+}
+
+fn step_summary(step: &AiStep) -> String {
+    let Some(command) = step.command.as_deref() else { return step.note.clone() };
+    let p = &step.params;
+    match command {
+        "layer.new.layer" => {
+            p.get("name").and_then(Value::as_str).map_or_else(|| "New editable raster layer".into(), |name| format!("New raster layer ? {name}"))
+        }
+        "layer.new.group" => p.get("name").and_then(Value::as_str).map_or_else(|| "New empty layer group".into(), |name| format!("New group ? {name}")),
+        "layer.groupLayers" => p
+            .get("name")
+            .and_then(Value::as_str)
+            .map_or_else(|| "Group the current layer selection".into(), |name| format!("Current selection ? group ? {name}")),
+        "layer.duplicate" => "Duplicate the active layer or current layer selection".into(),
+        "layer.setProps" => {
+            let mut parts = Vec::new();
+            if let Some(name) = p.get("name").and_then(Value::as_str) {
+                parts.push(format!("Rename ? {name}"));
+            }
+            if let Some(visible) = p.get("visible").and_then(Value::as_bool) {
+                parts.push(if visible { "Show layer".into() } else { "Hide layer".into() });
+            }
+            if let Some(value) = p.get("opacity").and_then(Value::as_f64) {
+                parts.push(format!("Opacity {}", percent(value)));
+            }
+            if let Some(value) = p.get("fill").and_then(Value::as_f64) {
+                parts.push(format!("Fill {}", percent(value)));
+            }
+            if let Some(blend) = p.get("blend").and_then(Value::as_str) {
+                parts.push(format!("Blend {blend}"));
+            }
+            if parts.is_empty() { "Update active layer properties".into() } else { parts.join(" ? ") }
+        }
+        "layer.arrange.bringForward" => "Active layer ? one position forward".into(),
+        "layer.arrange.sendBackward" => "Active layer ? one position backward".into(),
+        "layer.arrange.bringToFront" => "Active layer ? top of its stack".into(),
+        "layer.arrange.sendToBack" => "Active layer ? bottom of its stack".into(),
+        "layer.createClippingMask" => "Clip active layer to the layer below".into(),
+        "layer.releaseClippingMask" => "Release active layer from its clipping mask".into(),
+        "layer.newAdjustmentLayer.brightnessContrast" => {
+            let b = p.get("brightness").and_then(Value::as_f64).unwrap_or(0.0);
+            let c = p.get("contrast").and_then(Value::as_f64).unwrap_or(0.0);
+            format!("Adjustment layer ? Brightness {} ? Contrast {}", signed(b), signed(c))
+        }
+        "layer.newAdjustmentLayer.vibrance" => {
+            let v = p.get("vibrance").and_then(Value::as_f64).unwrap_or(0.0);
+            let sat = p.get("saturation").and_then(Value::as_f64).unwrap_or(0.0);
+            format!("Adjustment layer ? Vibrance {} ? Saturation {}", signed(v), signed(sat))
+        }
+        "layer.newAdjustmentLayer.curves" => {
+            let points = p.get("points").and_then(Value::as_array).map_or(0, Vec::len);
+            if points == 0 { "Adjustment layer ? Curves".into() } else { format!("Adjustment layer ? Curves ? {points} control points") }
+        }
+        "layer.newAdjustmentLayer.blackWhite" => "Adjustment layer ? Black & White".into(),
+        "layer.newAdjustmentLayer.invert" => "Adjustment layer ? Invert".into(),
+        _ => step.label.clone(),
+    }
+}
+
+fn plan_badge(ui: &mut egui::Ui, t: &Tokens, text: &str, emphasized: bool) {
+    egui::Frame::new()
+        .fill(if emphasized { t.accent_soft } else { t.field })
+        .stroke(Stroke::new(1.0, if emphasized { t.accent_border } else { t.field_border }))
+        .corner_radius(CornerRadius::same(t.radius_sm as u8))
+        .inner_margin(egui::Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(8.5).strong().color(if emphasized { t.accent_text } else { t.text_dim }));
+        });
+}
+
 fn plan_card(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     ui.add_space(2.0);
+    let ready = validate(&app.ui.ai.plan).is_ok();
     ui.horizontal(|ui| {
         ui.label(RichText::new(&app.ui.ai.plan_title).font(theme::semibold(12.5)).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let ready = validate(&app.ui.ai.plan).is_ok();
-            ui.label(RichText::new(if ready { "READY" } else { "REVIEW" }).size(9.0).color(if ready { t.accent_text } else { t.warning }));
+            plan_badge(ui, t, if ready { "READY" } else { "REVIEW" }, ready);
         });
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        plan_badge(ui, t, &format!("{} STEP{}", app.ui.ai.plan.len(), if app.ui.ai.plan.len() == 1 { "" } else { "S" }), false);
+        plan_badge(ui, t, "EDITABLE", false);
+        plan_badge(ui, t, "ONE UNDO", true);
     });
 
     egui::Frame::new()
@@ -832,7 +917,7 @@ fn plan_card(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
                     ui.vertical(|ui| {
                         ui.label(RichText::new(&step.label).size(11.5).color(t.text));
                         if let Some(command) = &step.command {
-                            ui.label(RichText::new(command).font(theme::mono(8.8)).color(t.text_faint));
+                            ui.label(RichText::new(step_summary(step)).size(9.8).color(t.text_dim)).on_hover_text(command);
                         } else {
                             ui.label(RichText::new(&step.note).size(9.5).color(t.warning));
                         }
@@ -871,7 +956,8 @@ fn plan_card(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     let valid = validate(&app.ui.ai.plan);
     let can_run = valid.is_ok() && app.session.active().is_some();
     ui.add_enabled_ui(can_run, |ui| {
-        if crate::widgets::primary_button(ui, "Run plan", ui.available_width()).clicked() {
+        let label = format!("Apply plan ? {} step{}", app.ui.ai.plan.len(), if app.ui.ai.plan.len() == 1 { "" } else { "s" });
+        if crate::widgets::primary_button(ui, &label, ui.available_width()).clicked() {
             run_plan(app);
         }
     });
@@ -1212,6 +1298,54 @@ mod tests {
         assert!((layer.opacity - 0.5).abs() < 1e-6);
         assert_eq!(layer.blend, photocraft_color::BlendMode::Multiply);
         assert!(!app.ui.ai.status_error);
+    }
+
+    #[test]
+    fn step_summaries_are_human_readable_and_hide_command_ids() {
+        let props = AiStep::command("Style", "layer.setProps", json!({"opacity": 0.55, "blend": "Multiply", "visible": true}));
+        let summary = step_summary(&props);
+        assert!(summary.contains("Opacity 55%"));
+        assert!(summary.contains("Blend Multiply"));
+        assert!(summary.contains("Show layer"));
+        assert!(!summary.contains("layer.setProps"));
+
+        let tone = AiStep::command("Tone", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": -6}));
+        let summary = step_summary(&tone);
+        assert!(summary.contains("Brightness +12"));
+        assert!(summary.contains("Contrast -6"));
+    }
+
+    #[test]
+    fn plan_review_surface_exposes_human_summary_and_atomic_badge() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.ui.panels.ai = true;
+        app.ui.ai.plan_title = "Product polish".into();
+        app.ui.ai.workflow_name = "Product polish".into();
+        app.ui.ai.plan = vec![
+            AiStep::command("Style product", "layer.setProps", json!({"opacity": 0.55, "blend": "Multiply"})),
+            AiStep::command("Lift tone", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": 6})),
+        ];
+        let mut h = Harness::builder().with_size(vec2(620.0, 820.0)).build_ui_state(
+            |ui, app: &mut PhotocraftApp| {
+                let ctx = ui.ctx().clone();
+                if !ctx.fonts(|fonts| fonts.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                crate::panels::right_dock(app, ui);
+                egui::CentralPanel::default().show(ui, |_| {});
+            },
+            app,
+        );
+        PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::Studio);
+        h.state_mut().ui.theme = crate::theme::ThemeKind::Studio;
+        h.run_steps(4);
+        assert!(h.query_by_label("ONE UNDO").is_some());
+        assert!(h.query_by_label("2 STEPS").is_some());
+        assert!(h.query_by_label_contains("Opacity 55%").is_some());
+        assert!(h.query_by_label_contains("Brightness +12").is_some());
+        assert!(h.query_by_label("Apply plan ? 2 steps").is_some());
+        assert!(h.query_by_label_contains("layer.setProps").is_none(), "technical command ids stay out of the visible review surface");
     }
 
     #[test]

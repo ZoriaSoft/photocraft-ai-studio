@@ -56,7 +56,7 @@ export requested sizes
 
 Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 - [x] Safe command allowlist with command-specific parameter validation.
-- [ ] Command preview before destructive or expensive operations.
+- [x] Human-readable plan review before execution, with atomic Undo semantics visible in the UI.
 - [x] Atomic multi-step AI actions: one Undo, automatic rollback on failure.
 - [x] Save a validated command sequence as a reusable workflow.
 
