@@ -51,7 +51,10 @@ export requested sizes
 
 ### AI workflow MVP
 
-- [ ] Natural-language command planner.
+- [x] Natural-language command planner foundation (local + optional model provider).
+- [ ] Expand the model command vocabulary and document context.
+
+Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 - [ ] Safe command allowlist and validation layer.
 - [ ] Command preview before destructive or expensive operations.
 - [ ] Undoable multi-step AI actions.

@@ -178,6 +178,9 @@ pub type RecoverFn = Box<dyn FnMut() -> Vec<(Option<String>, Document)>>;
 pub type AppendTextFn = Box<dyn FnMut(&str, &str) -> Result<(), String>>;
 /// Requests from the operating system since the last call (see [`OsEvent`]).
 pub type OsEventsFn = Box<dyn FnMut() -> Vec<OsEvent>>;
+/// Start an AI planning request. The platform service performs network I/O off the UI thread and
+/// returns a receiver that resolves to a validated editor plan or an error.
+pub type AiPlanFn = Box<dyn Fn(ai_panel::AiPlannerRequest) -> Receiver<Result<ai_panel::PlannedRequest, String>>>;
 
 /// Platform services injected by the app binary (file dialogs, codecs), keeping this crate free of
 /// I/O dependencies.
@@ -219,6 +222,8 @@ pub struct Services {
     pub append_text: Option<AppendTextFn>,
     /// OS requests (macOS open-documents / quit Apple events), polled every frame.
     pub os_events: Option<OsEventsFn>,
+    /// Optional model-backed AI planner. When absent, AI Studio uses its deterministic local planner.
+    pub ai_plan: Option<AiPlanFn>,
     /// The persistent brush preset store, loading in the background (desktop; see
     /// `photocraft_engine::preset_store`). Attached to the session once it arrives; without
     /// one, brush presets are session-only (web, tests).
@@ -359,6 +364,10 @@ pub struct PhotocraftApp {
     pub background_jobs: bool,
     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
     pub jobs: jobs_ui::JobsUi,
+    /// In-flight model-backed AI plan. Runtime-only; UI state remains serializable.
+    pub ai_plan_rx: Option<Receiver<Result<ai_panel::PlannedRequest, String>>>,
+    /// Prompt paired with `ai_plan_rx`, so edits typed while a request is running cannot relabel its result.
+    pub ai_plan_prompt: Option<String>,
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     live_tokens: theme::live::LiveTokens,
 }
@@ -433,6 +442,8 @@ impl PhotocraftApp {
             stylus: Default::default(),
             background_jobs: false,
             jobs: Default::default(),
+            ai_plan_rx: None,
+            ai_plan_prompt: None,
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
             live_tokens: theme::live::LiveTokens::from_env(),
         };

@@ -5,7 +5,7 @@ use photocraft_color::{ColorMode, SampleType};
 use photocraft_doc::{Document, Layer, Size};
 use photocraft_format::Autosaver;
 use photocraft_geom::Rect;
-use photocraft_ui_egui::Services;
+use photocraft_ui_egui::{AiPlanFn, Services};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -69,6 +69,82 @@ fn recovery_dir() -> Option<PathBuf> {
 /// the preferences go through here, so a failed or interrupted save never destroys the old file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     photocraft_format::atomic_write(path, bytes).map_err(|e| e.to_string())
+}
+
+/// Model-backed planning is opt-in: no key means the UI stays entirely local. Secrets are read
+/// from the process environment and are never copied into PhotoCraft preferences or UI state.
+fn ai_planner() -> Option<AiPlanFn> {
+    let api_key = std::env::var("OPENAI_API_KEY").ok().filter(|key| !key.trim().is_empty())?;
+    let model = std::env::var("PHOTOCRAFT_AI_MODEL").unwrap_or_else(|_| "gpt-5.5".into());
+    let endpoint = std::env::var("PHOTOCRAFT_AI_ENDPOINT").unwrap_or_else(|_| "https://api.openai.com/v1/responses".into());
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(45)).build().ok()?;
+    Some(Box::new(move |request| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (client, api_key, model, endpoint) = (client.clone(), api_key.clone(), model.clone(), endpoint.clone());
+        std::thread::spawn(move || {
+            let result = openai_plan(&client, &endpoint, &api_key, &model, request);
+            let _ = tx.send(result);
+        });
+        rx
+    }))
+}
+
+fn openai_plan(
+    client: &reqwest::blocking::Client,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    request: photocraft_ui_egui::ai_panel::AiPlannerRequest,
+) -> Result<photocraft_ui_egui::ai_panel::PlannedRequest, String> {
+    let contract = photocraft_ui_egui::ai_panel::planner_contract();
+    let instructions = format!(
+        "You are the planning layer of an editable image editor. Convert the user's intent into a short JSON editor plan. \
+Only use the command contract below. Return JSON only; no markdown or prose outside the JSON. \
+A null command is allowed only to honestly represent a capability the editor cannot execute yet.\n\nCONTRACT:\n{}",
+        serde_json::to_string_pretty(&contract).map_err(|error| error.to_string())?
+    );
+    let input = format!(
+        "User request:\n{}\n\nDocument context (metadata only, no pixels):\n{}",
+        request.prompt,
+        serde_json::to_string_pretty(&request.context).map_err(|error| error.to_string())?
+    );
+    let body = serde_json::json!({
+        "model": model,
+        "instructions": instructions,
+        "input": input,
+        "store": false
+    });
+    let response = client.post(endpoint).bearer_auth(api_key).json(&body).send().map_err(|error| format!("AI request failed: {error}"))?;
+    let status = response.status();
+    let value: serde_json::Value = response.json().map_err(|error| format!("AI response was not valid JSON: {error}"))?;
+    if !status.is_success() {
+        let message = value.pointer("/error/message").and_then(serde_json::Value::as_str).unwrap_or("model provider returned an error");
+        return Err(format!("AI provider error ({status}): {message}"));
+    }
+    let text = response_output_text(&value).ok_or_else(|| "AI response did not contain output text.".to_string())?;
+    let plan = parse_plan_json(text)?;
+    photocraft_ui_egui::ai_panel::validate_model_plan(&plan)?;
+    Ok(plan)
+}
+
+fn response_output_text(value: &serde_json::Value) -> Option<&str> {
+    value.get("output")?.as_array()?.iter().find_map(|item| {
+        item.get("content")?
+            .as_array()?
+            .iter()
+            .find_map(|content| (content.get("type")?.as_str()? == "output_text").then(|| content.get("text")?.as_str()).flatten())
+    })
+}
+
+fn parse_plan_json(text: &str) -> Result<photocraft_ui_egui::ai_panel::PlannedRequest, String> {
+    let trimmed = text.trim();
+    if let Ok(plan) = serde_json::from_str(trimmed) {
+        return Ok(plan);
+    }
+    // Be tolerant of a provider wrapping otherwise-valid JSON in markdown despite the instruction.
+    let start = trimmed.find('{').ok_or_else(|| "AI plan did not contain a JSON object.".to_string())?;
+    let end = trimmed.rfind('}').ok_or_else(|| "AI plan JSON was incomplete.".to_string())?;
+    serde_json::from_str(&trimmed[start..=end]).map_err(|error| format!("AI plan JSON was invalid: {error}"))
 }
 
 pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) -> Services {
@@ -184,6 +260,7 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         })),
         // Set by main once the Apple-event handlers are connected (macOS).
         os_events: None,
+        ai_plan: ai_planner(),
         // Set by main, which starts loading the store before the window opens.
         preset_store: None,
     }
@@ -249,4 +326,27 @@ pub fn export_flat(doc: &Document, path: &str) -> Result<Vec<u8>, String> {
         _ => img,
     };
     photocraft_codecs::encode(&img, format, &EncodeOptions::default()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod ai_tests {
+    use super::*;
+
+    #[test]
+    fn parses_model_plan_from_response_text() {
+        let plan = parse_plan_json(
+            r#"```json
+{"title":"Polish","steps":[{"label":"Lift tone","command":"layer.newAdjustmentLayer.brightnessContrast","params":{"brightness":8,"contrast":4},"note":""}]}
+```"#,
+        )
+        .unwrap();
+        assert_eq!(plan.title, "Polish");
+        assert!(photocraft_ui_egui::ai_panel::validate_model_plan(&plan).is_ok());
+    }
+
+    #[test]
+    fn extracts_output_text_from_responses_payload() {
+        let value = serde_json::json!({"output":[{"type":"message","content":[{"type":"output_text","text":"{\"title\":\"x\",\"steps\":[]}"}]}]});
+        assert_eq!(response_output_text(&value), Some(r#"{"title":"x","steps":[]}"#));
+    }
 }
