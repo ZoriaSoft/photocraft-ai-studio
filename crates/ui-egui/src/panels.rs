@@ -964,7 +964,14 @@ fn ai_drawer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
                     if icons::button(ui, "x", 24.0, false, "Close AI Studio").clicked() {
                         close = true;
                     }
-                    ui.label(egui::RichText::new("LOCAL").size(9.0).color(t.accent_text));
+                    let badge = if app.ai_plan_rx.is_some() {
+                        "THINKING"
+                    } else if app.services.ai_plan.is_some() {
+                        "MODEL"
+                    } else {
+                        "LOCAL"
+                    };
+                    ui.label(egui::RichText::new(badge).size(9.0).color(t.accent_text));
                 });
             });
             ui.add_space(7.0);

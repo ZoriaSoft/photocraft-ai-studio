@@ -60,10 +60,18 @@ impl AiStep {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlannedRequest {
     pub title: String,
     pub steps: Vec<AiStep>,
+}
+
+/// Provider-neutral request passed to the native model service.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiPlannerRequest {
+    pub prompt: String,
+    /// Small, non-pixel document summary. Image data is never sent by this planning layer.
+    pub context: Value,
 }
 
 /// Commands that an AI-generated plan may execute without adding a new review rule.
@@ -82,13 +90,19 @@ const SAFE_COMMANDS: &[&str] = &[
 ];
 
 /// Validate the trust boundary between a planner and the editor engine.
-pub fn validate(steps: &[AiStep]) -> Result<(), String> {
+fn validate_steps(steps: &[AiStep], require_executable: bool) -> Result<(), String> {
     if steps.is_empty() {
-        return Err("The plan has no executable steps.".into());
+        return Err("The plan has no steps.".into());
     }
     for step in steps {
         let Some(command) = step.command.as_deref() else {
-            return Err(format!("{} needs an AI capability that is not connected yet.", step.label));
+            if require_executable {
+                return Err(format!("{} needs an AI capability that is not connected yet.", step.label));
+            }
+            if step.note.trim().is_empty() {
+                return Err(format!("{} is pending but has no explanation.", step.label));
+            }
+            continue;
         };
         if !SAFE_COMMANDS.contains(&command) {
             return Err(format!("Command `{command}` is not in the AI safety allowlist."));
@@ -98,6 +112,53 @@ pub fn validate(steps: &[AiStep]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A plan may only run when every step maps to a reviewed editor command.
+pub fn validate(steps: &[AiStep]) -> Result<(), String> {
+    validate_steps(steps, true)
+}
+
+/// Validate model output before it is accepted into UI state. Pending steps are allowed so the
+/// model can explicitly say a capability is unavailable; unknown commands are never accepted.
+pub fn validate_model_plan(plan: &PlannedRequest) -> Result<(), String> {
+    if plan.title.trim().is_empty() {
+        return Err("The model returned a plan without a title.".into());
+    }
+    validate_steps(&plan.steps, false)
+}
+
+/// Contract sent to model providers. The provider can phrase the prompt however it wants, but this
+/// is the complete command surface that remote planning is allowed to produce.
+pub fn planner_contract() -> Value {
+    json!({
+        "result": {
+            "title": "short descriptive string",
+            "steps": [{
+                "label": "human-readable action",
+                "command": "one allowed command id, or null when the capability is unavailable",
+                "params": {},
+                "note": "empty for executable steps; explain why a null-command step is pending"
+            }]
+        },
+        "allowedCommands": [
+            {"id": "layer.new.layer", "params": {"name": "optional string"}},
+            {"id": "layer.new.group", "params": {"name": "optional string"}},
+            {"id": "layer.duplicate", "params": {}},
+            {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "number", "contrast": "number"}},
+            {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional array of [input, output] points"}},
+            {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "number", "saturation": "number"}},
+            {"id": "layer.newAdjustmentLayer.blackWhite", "params": {}},
+            {"id": "layer.newAdjustmentLayer.invert", "params": {}}
+        ],
+        "rules": [
+            "Return JSON only, with exactly title and steps at the top level.",
+            "Never invent a command id. Use null when the request needs a capability outside the allowed commands.",
+            "Prefer non-destructive adjustment layers and keep the document editable.",
+            "Do not claim a vision, selection, export, filesystem, or network action happened when no allowed command can perform it.",
+            "Keep plans short and directly related to the user's request."
+        ]
+    })
 }
 
 /// Local MVP planner. It intentionally recognizes a small vocabulary; the UI makes unsupported
@@ -161,21 +222,96 @@ pub fn plan(prompt: &str) -> PlannedRequest {
     PlannedRequest { title: "Edit plan".into(), steps }
 }
 
-fn set_plan(app: &mut PhotocraftApp, prompt: String) {
-    let planned = plan(&prompt);
+fn remember_prompt(app: &mut PhotocraftApp, prompt: &str) {
     let ai = &mut app.ui.ai;
     ai.prompt = prompt.trim().to_string();
-    ai.plan_title = planned.title;
-    ai.plan = planned.steps;
-    ai.status_error = false;
-    ai.status = match validate(&ai.plan) {
-        Ok(()) => format!("{} step{} ready", ai.plan.len(), if ai.plan.len() == 1 { "" } else { "s" }),
-        Err(reason) => reason,
-    };
     if !ai.prompt.is_empty() {
         ai.recent_prompts.retain(|p| p != &ai.prompt);
         ai.recent_prompts.insert(0, ai.prompt.clone());
         ai.recent_prompts.truncate(6);
+    }
+}
+
+fn apply_plan(app: &mut PhotocraftApp, prompt: String, planned: PlannedRequest, source: &str) {
+    remember_prompt(app, &prompt);
+    let ai = &mut app.ui.ai;
+    ai.plan_title = planned.title;
+    ai.plan = planned.steps;
+    ai.status_error = false;
+    ai.status = match validate(&ai.plan) {
+        Ok(()) => format!("{} step{} ready · {source}", ai.plan.len(), if ai.plan.len() == 1 { "" } else { "s" }),
+        Err(reason) => reason,
+    };
+}
+
+fn planner_request(app: &PhotocraftApp, prompt: &str) -> AiPlannerRequest {
+    let context = app.session.active().map_or_else(
+        || json!({"documentOpen": false}),
+        |state| {
+            json!({
+                "documentOpen": true,
+                "width": state.doc.size.width,
+                "height": state.doc.size.height,
+                "layers": state.doc.layers.len(),
+                "colorMode": format!("{:?}", state.doc.mode),
+                "depth": format!("{:?}", state.doc.depth)
+            })
+        },
+    );
+    AiPlannerRequest { prompt: prompt.trim().to_string(), context }
+}
+
+fn start_plan(app: &mut PhotocraftApp, prompt: String) {
+    remember_prompt(app, &prompt);
+    let request = planner_request(app, &prompt);
+    if let Some(service) = app.services.ai_plan.as_ref() {
+        app.ai_plan_rx = Some(service(request));
+        app.ai_plan_prompt = Some(prompt);
+        app.ui.ai.plan.clear();
+        app.ui.ai.plan_title = "Planning…".into();
+        app.ui.ai.status = "Connected model is building a safe editor plan…".into();
+        app.ui.ai.status_error = false;
+    } else {
+        apply_plan(app, prompt.clone(), plan(&prompt), "local planner");
+    }
+}
+
+fn poll_model_plan(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use std::sync::mpsc::TryRecvError;
+    let result = app.ai_plan_rx.as_ref().and_then(|rx| match rx.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(Err("AI planner disconnected before returning a result.".into())),
+    });
+    if app.ai_plan_rx.is_some() && result.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(80));
+    }
+    let Some(result) = result else { return };
+    app.ai_plan_rx = None;
+    let prompt = app.ai_plan_prompt.take().unwrap_or_else(|| app.ui.ai.prompt.clone());
+    match result {
+        Ok(planned) => match validate_model_plan(&planned) {
+            Ok(()) => apply_plan(app, prompt, planned, "connected model"),
+            Err(error) => {
+                app.ui.ai.plan.clear();
+                app.ui.ai.plan_title = "Plan rejected".into();
+                app.ui.ai.status = error;
+                app.ui.ai.status_error = true;
+            }
+        },
+        Err(error) => {
+            // Network/model failures fall back to the deterministic planner when it can understand
+            // the request, while still surfacing the provider error for unsupported requests.
+            let fallback = plan(&prompt);
+            if validate(&fallback.steps).is_ok() {
+                apply_plan(app, prompt, fallback, "local fallback");
+            } else {
+                app.ui.ai.plan.clear();
+                app.ui.ai.plan_title = "Model unavailable".into();
+                app.ui.ai.status = error;
+                app.ui.ai.status_error = true;
+            }
+        }
     }
 }
 
@@ -203,6 +339,7 @@ fn run_plan(app: &mut PhotocraftApp) {
 }
 
 pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, workflows: bool) {
+    poll_model_plan(app, ui.ctx());
     if workflows {
         workflows_panel(app, ui);
     } else {
@@ -215,16 +352,17 @@ fn assistant_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 9.0;
     ui.add_space(2.0);
 
-    hero(ui, &t);
+    hero(app, ui, &t);
     prompt_box(app, ui, &t);
     quick_prompts(app, ui, &t);
 
-    let can_plan = !app.ui.ai.prompt.trim().is_empty();
+    let planning = app.ai_plan_rx.is_some();
+    let can_plan = !app.ui.ai.prompt.trim().is_empty() && !planning;
     let submit = ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
     let mut make_plan = false;
     ui.horizontal(|ui| {
         let width = (ui.available_width() - 8.0).max(100.0);
-        let primary = crate::widgets::primary_button(ui, "Create plan", width * 0.62);
+        let primary = crate::widgets::primary_button(ui, if planning { "Planning…" } else { "Create plan" }, width * 0.62);
         if primary.clicked() && can_plan {
             make_plan = true;
         }
@@ -235,6 +373,8 @@ fn assistant_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             app.ui.ai.plan_title.clear();
             app.ui.ai.status = "Ready for a request".into();
             app.ui.ai.status_error = false;
+            app.ai_plan_rx = None;
+            app.ai_plan_prompt = None;
         }
     });
     if submit && can_plan {
@@ -242,7 +382,7 @@ fn assistant_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     if make_plan {
         let prompt = app.ui.ai.prompt.clone();
-        set_plan(app, prompt);
+        start_plan(app, prompt);
     }
 
     if !app.ui.ai.plan.is_empty() {
@@ -252,7 +392,7 @@ fn assistant_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 }
 
-fn hero(ui: &mut egui::Ui, t: &Tokens) {
+fn hero(app: &PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     egui::Frame::new()
         .fill(t.accent_soft)
         .stroke(Stroke::new(1.0, t.accent_border))
@@ -265,7 +405,12 @@ fn hero(ui: &mut egui::Ui, t: &Tokens) {
                 crate::icons::paint(ui, r, "sparkles", 16.0, Color32::WHITE);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Creative Copilot").font(theme::semibold(14.0)).color(t.text));
-                    ui.label(RichText::new("Local command planner · no upload").size(10.5).color(t.text_dim));
+                    let detail = if app.services.ai_plan.is_some() {
+                        "Connected model planner · commands validated locally"
+                    } else {
+                        "Local command planner · no upload"
+                    };
+                    ui.label(RichText::new(detail).size(10.5).color(t.text_dim));
                 });
             });
         });
@@ -399,7 +544,7 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ] {
         if workflow_card(ui, &t, icon, title, subtitle) {
             let prompt = prompt.to_string();
-            set_plan(app, prompt);
+            apply_plan(app, prompt.clone(), plan(&prompt), "workflow");
             app.ui.ai.tab = 0;
         }
     }
@@ -461,6 +606,46 @@ mod tests {
     fn validator_rejects_commands_outside_the_allowlist() {
         let steps = vec![AiStep::command("Export it", "file.save", json!({}))];
         assert!(validate(&steps).is_err());
+    }
+
+    #[test]
+    fn model_plan_is_revalidated_after_the_service_boundary() {
+        let services = crate::Services {
+            ai_plan: Some(Box::new(|_| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ =
+                    tx.send(Ok(PlannedRequest { title: "Unsafe".into(), steps: vec![AiStep::command("Save behind the user's back", "file.save", json!({}))] }));
+                rx
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        start_plan(&mut app, "do something unsafe".into());
+        poll_model_plan(&mut app, &egui::Context::default());
+        assert!(app.ui.ai.plan.is_empty());
+        assert!(app.ui.ai.status_error);
+        assert!(app.ui.ai.status.contains("allowlist"));
+    }
+
+    #[test]
+    fn connected_model_plan_can_cross_the_boundary_when_safe() {
+        let services = crate::Services {
+            ai_plan: Some(Box::new(|_| {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let _ = tx.send(Ok(PlannedRequest {
+                    title: "Polish".into(),
+                    steps: vec![AiStep::command("Lift contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 8, "contrast": 5}))],
+                }));
+                rx
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        start_plan(&mut app, "polish this".into());
+        poll_model_plan(&mut app, &egui::Context::default());
+        assert_eq!(app.ui.ai.plan_title, "Polish");
+        assert!(!app.ui.ai.status_error);
+        assert!(app.ui.ai.status.contains("connected model"));
     }
 
     #[test]

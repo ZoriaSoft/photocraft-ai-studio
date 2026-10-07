@@ -1,0 +1,33 @@
+# AI Studio model planner
+
+AI Studio always has a deterministic local planner. The desktop build can optionally use an OpenAI Responses API model for broader natural-language planning.
+
+## Enable the model planner
+
+Set the API key in the environment **before launching the app**. Never commit API keys to this repository or put them in PhotoCraft preferences.
+
+PowerShell:
+
+```powershell
+$env:OPENAI_API_KEY = "your-key"
+# Optional; defaults to gpt-5.5
+$env:PHOTOCRAFT_AI_MODEL = "gpt-5.5"
+```
+
+Optional provider endpoint override:
+
+```powershell
+$env:PHOTOCRAFT_AI_ENDPOINT = "https://api.openai.com/v1/responses"
+```
+
+When `OPENAI_API_KEY` is absent, the model service is not created and AI Studio remains local-only.
+
+## Privacy boundary
+
+The command planner does **not** upload document pixels. It currently sends only the user's prompt plus a small document summary: whether a document is open, canvas dimensions, layer count, color mode and bit depth.
+
+## Safety boundary
+
+Model output is treated as untrusted data. The response must parse into a structured plan, and every executable command must be present in AI Studio's reviewed allowlist. Unknown commands are rejected before entering the plan UI. Plans containing capabilities the editor cannot execute can use a pending step with no command; pending steps cannot run.
+
+If the model request fails and the local planner understands the request, AI Studio falls back to the local plan. Otherwise the provider error is surfaced without executing anything.

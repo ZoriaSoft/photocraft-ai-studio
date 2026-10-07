@@ -33,6 +33,7 @@ log = { workspace = true }
 rfd = { workspace = true }
 arboard = { version = "3", features = ["wayland-data-control"] }
 open = "5"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Finder double-click / Open With / Dock drops arrive as Apple events; this small audited crate
