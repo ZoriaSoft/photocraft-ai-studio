@@ -627,19 +627,55 @@ fn run_plan(app: &mut PhotocraftApp) {
         app.ui.ai.status_error = true;
         return;
     }
+    let Some((doc_id, revision, history_before)) = app.session.active().map(|state| (state.doc.id.0, state.revision, state.history.past_len())) else {
+        app.ui.ai.status = "Open a document to run this plan.".into();
+        app.ui.ai.status_error = true;
+        return;
+    };
+    let journal_before = app.session.journal.len();
+    // Injected only after validation, so neither a model nor a saved workflow can control history
+    // grouping. PhotoCraft's command dispatcher treats `coalesce` as a shell-level parameter.
+    let coalesce = format!("ai-plan:{doc_id}:{revision}");
     let mut completed = 0usize;
     for step in steps {
         let Some(command) = step.command else { continue };
-        match app.run(&command, step.params) {
+        let mut params = match step.params {
+            Value::Null => serde_json::Map::new(),
+            Value::Object(map) => map,
+            _ => {
+                app.ui.ai.status = format!("Plan stopped: invalid parameters for `{command}`.");
+                app.ui.ai.status_error = true;
+                return;
+            }
+        };
+        params.insert("coalesce".into(), Value::String(coalesce.clone()));
+        match app.run(&command, Value::Object(params)) {
             Ok(_) => completed += 1,
             Err(error) => {
-                app.ui.ai.status = format!("Stopped after {completed} step(s): {error}");
+                let changed = app.session.active().is_some_and(|state| state.history.past_len() > history_before);
+                let rolled_back = changed && app.session.undo();
+                if rolled_back {
+                    if let Some(state) = app.session.active_mut() {
+                        state.history.clear_redo();
+                    }
+                    app.sync_views();
+                }
+                app.session.journal.truncate(journal_before);
+                app.ui.ai.status = if rolled_back {
+                    format!("Plan rolled back after {completed} step(s): {error}")
+                } else {
+                    format!("Plan stopped before making changes: {error}")
+                };
                 app.ui.ai.status_error = true;
                 return;
             }
         }
     }
-    app.ui.ai.status = format!("Applied {completed} step{} · each action is undoable", if completed == 1 { "" } else { "s" });
+    if let Some(state) = app.session.active_mut() {
+        let title = app.ui.ai.plan_title.trim();
+        state.history.set_current_label(if title.is_empty() { "AI Plan".to_string() } else { format!("AI Plan: {title}") });
+    }
+    app.ui.ai.status = format!("Applied {completed} step{} ? one undo", if completed == 1 { "" } else { "s" });
     app.ui.ai.status_error = false;
 }
 
@@ -1176,6 +1212,62 @@ mod tests {
         assert!((layer.opacity - 0.5).abs() < 1e-6);
         assert_eq!(layer.blend, photocraft_color::BlendMode::Multiply);
         assert!(!app.ui.ai.status_error);
+    }
+
+    #[test]
+    fn multi_step_plan_is_one_undo_step() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        let (layers_before, history_before) = {
+            let state = app.session.active().unwrap();
+            (state.doc.layers.len(), state.history.past_len())
+        };
+        app.ui.ai.plan_title = "Atomic polish".into();
+        app.ui.ai.plan = vec![
+            AiStep::command("Create working layer", "layer.new.layer", json!({"name": "AI Working"})),
+            AiStep::command("Add monochrome look", "layer.newAdjustmentLayer.blackWhite", json!({})),
+        ];
+        run_plan(&mut app);
+        let state = app.session.active().unwrap();
+        assert_eq!(state.history.past_len(), history_before + 1);
+        assert_eq!(state.doc.layers.len(), layers_before + 2);
+        assert_eq!(state.history.undo_label(), Some("AI Plan: Atomic polish"));
+        assert!(app.ui.ai.status.contains("one undo"));
+
+        assert!(app.session.undo());
+        let state = app.session.active().unwrap();
+        assert_eq!(state.doc.layers.len(), layers_before);
+        assert_eq!(state.history.past_len(), history_before);
+    }
+
+    #[test]
+    fn failed_multi_step_plan_rolls_back_and_cannot_be_redone() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        let (layers_before, history_before, journal_before) = {
+            let state = app.session.active().unwrap();
+            (state.doc.layers.len(), state.history.past_len(), app.session.journal.len())
+        };
+        app.ui.ai.plan_title = "Should rollback".into();
+        app.ui.ai.plan = vec![
+            AiStep::command("Create working layer", "layer.new.layer", json!({"name": "Temporary"})),
+            // A newly-created layer is already topmost, so this reviewed command fails at runtime.
+            AiStep::command("Move it further forward", "layer.arrange.bringForward", json!({})),
+        ];
+        run_plan(&mut app);
+        let state = app.session.active().unwrap();
+        assert_eq!(state.doc.layers.len(), layers_before);
+        assert_eq!(state.history.past_len(), history_before);
+        assert!(!state.history.can_redo());
+        assert_eq!(app.session.journal.len(), journal_before);
+        assert!(app.ui.ai.status_error);
+        assert!(app.ui.ai.status.contains("rolled back"));
+    }
+
+    #[test]
+    fn ai_plans_cannot_supply_their_own_coalesce_key() {
+        let plan = vec![AiStep::command("Try to control history", "layer.new.layer", json!({"name": "x", "coalesce": "attacker"}))];
+        assert!(validate(&plan).is_err());
     }
 
     #[test]

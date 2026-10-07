@@ -38,3 +38,6 @@ If the model request fails and the local planner understands the request, AI Stu
 A validated plan can be saved as a reusable workflow from the Assistant tab. Desktop builds persist these recipes separately as `ai-workflows.json` in the application config directory. The file stores only the workflow name and validated editor steps; the original natural-language prompt is not persisted with the recipe.
 
 Saved workflows are treated as untrusted input when reloaded: every recipe is passed through the same command and parameter validator again, invalid entries are discarded, and future schema versions that this build does not understand are rejected.
+## Atomic plan execution
+
+Executable AI plans run as one history transaction. The shell injects an internal coalescing key only after the plan has passed validation, so model output and saved workflows cannot control history grouping. A successful multi-step plan appears as one `AI Plan: ?` undo state. If any later step fails, AI Studio automatically undoes the already-applied steps, removes the failed plan from redo history, and restores the command journal to its pre-plan state.
