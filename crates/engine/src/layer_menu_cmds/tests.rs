@@ -414,6 +414,44 @@ fn refine_subject_mask_changes_only_the_editable_mask_and_is_undoable() {
 }
 
 #[test]
+fn product_layout_helpers_fit_the_editable_subject_and_keep_background_editable() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |_, _| [0.75, 0.25, 0.12, 1.0]);
+    let product = s.active().unwrap().active_layer.unwrap();
+    s.edit("subject mask", |doc, _| {
+        let mut mask = LayerMask::hide_all();
+        mask.surface.fill_rect(Rect::new(2, 3, 12, 13), &[1.0]);
+        doc.layer_mut(product).unwrap().mask = Some(mask);
+        Ok(())
+    })
+    .unwrap();
+
+    let before = active(&s).mask.as_ref().unwrap().surface.content_bounds();
+    let r = s.execute("layer.fitSubjectToCanvas", json!({"margin": 0.2, "allowUpscale": true})).unwrap();
+    assert!(r["scale"].as_f64().unwrap() > 1.0);
+    let fitted = active(&s).mask.as_ref().unwrap().surface.content_bounds();
+    let canvas = doc(&s).bounds();
+    assert!(((fitted.x0 + fitted.x1) - (canvas.x0 + canvas.x1)).abs() <= 2, "subject centered horizontally: {fitted:?}");
+    assert!(((fitted.y0 + fitted.y1) - (canvas.y0 + canvas.y1)).abs() <= 2, "subject centered vertically: {fitted:?}");
+    assert!(fitted.x0 >= 7 && fitted.y0 >= 5 && fitted.x1 <= 33 && fitted.y1 <= 25, "margin respected: {fitted:?}");
+    assert_eq!(s.active().unwrap().active_layer, Some(product));
+
+    let bg = s.execute("layer.addBackgroundFill", json!({"color": "#f7f7f7", "name": "Catalog Background"})).unwrap()["layer"].as_u64().unwrap();
+    assert_eq!(s.active().unwrap().active_layer, Some(product), "adding a background must keep the product active");
+    let bottom = &doc(&s).layers[0];
+    assert_eq!(bottom.id.0, bg);
+    assert_eq!(bottom.name, "Catalog Background");
+    let LayerContent::Fill(Fill::Solid(color)) = &bottom.content else { panic!("editable solid-color background") };
+    let rgb = color.to_rgb();
+    assert!(rgb.iter().all(|v| (*v - 247.0 / 255.0).abs() < 1e-3));
+
+    assert!(s.undo(), "background fill is undoable");
+    assert_eq!(doc(&s).layers.len(), 1);
+    assert!(s.undo(), "fit is undoable");
+    assert_eq!(active(&s).mask.as_ref().unwrap().surface.content_bounds(), before);
+}
+
+#[test]
 fn layer_masks_in_gray_cmyk_lab() {
     for mode in ["gray", "cmyk", "lab"] {
         let mut s = session(16, mode);

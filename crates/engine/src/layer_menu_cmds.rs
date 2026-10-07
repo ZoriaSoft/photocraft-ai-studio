@@ -5,8 +5,8 @@
 
 use photocraft_algo::matting::RefineParams;
 use photocraft_algo::selection::Region;
-use photocraft_color::{BlendMode, ColorMode};
-use photocraft_doc::{BlendIf, BlendRange, Document, Effect, Layer, LayerContent, LayerId, LayerMask, SmartSource, StackMode};
+use photocraft_color::{BlendMode, Color, ColorMode};
+use photocraft_doc::{BlendIf, BlendRange, Document, Effect, Fill, Layer, LayerContent, LayerId, LayerMask, SmartSource, StackMode};
 use photocraft_geom::Rect;
 use photocraft_raster::{Surface, from_rgba_into, to_rgba};
 use serde_json::{Value, json};
@@ -271,6 +271,58 @@ fn refine_subject_mask(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     Ok(json!({"bounds": [bbox.x0, bbox.y0, bbox.width(), bbox.height()], "layer": id.0, "editableMask": true, "refined": true}))
+}
+
+/// Fit the active masked subject inside the canvas while preserving aspect ratio. Subject bounds
+/// come from the editable mask, not the hidden full-image raster, so cutouts center reliably.
+fn fit_subject_to_canvas(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = layer_param(s, p)?;
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    let doc = d.doc.clone();
+    let layer = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+    if !matches!(layer.content, LayerContent::Raster(_)) {
+        return Err(other("subject fitting currently requires a raster layer"));
+    }
+    let mask = layer.mask.as_ref().ok_or_else(|| other("the active layer has no editable subject mask"))?;
+    let canvas = doc.bounds();
+    let subject = mask.surface.content_bounds().intersect(&canvas);
+    if subject.is_empty() {
+        return Err(other("the active layer mask has no visible subject to fit"));
+    }
+    let margin = num(p, "margin", 0.12).clamp(0.0, 0.45) as f64;
+    let allow_upscale = p.get("allowUpscale").and_then(Value::as_bool).unwrap_or(false);
+    let available_w = f64::from(canvas.width()) * (1.0 - 2.0 * margin);
+    let available_h = f64::from(canvas.height()) * (1.0 - 2.0 * margin);
+    if available_w <= 1.0 || available_h <= 1.0 {
+        return Err(bad("layer.fitSubjectToCanvas", "margin leaves no usable canvas area"));
+    }
+    let mut scale = (available_w / f64::from(subject.width())).min(available_h / f64::from(subject.height()));
+    if !allow_upscale {
+        scale = scale.min(1.0);
+    }
+    scale = scale.clamp(0.05, 4.0);
+    let subject_cx = (f64::from(subject.x0) + f64::from(subject.x1)) * 0.5;
+    let subject_cy = (f64::from(subject.y0) + f64::from(subject.y1)) * 0.5;
+    let canvas_cx = (f64::from(canvas.x0) + f64::from(canvas.x1)) * 0.5;
+    let canvas_cy = (f64::from(canvas.y0) + f64::from(canvas.y1)) * 0.5;
+    let tx = canvas_cx - scale * subject_cx;
+    let ty = canvas_cy - scale * subject_cy;
+    crate::transform_cmds::transform(s, &json!({"layer": id.0, "matrix": [scale, 0.0, 0.0, scale, tx, ty]}))?;
+    Ok(json!({"layer": id.0, "scale": scale, "center": [canvas_cx, canvas_cy], "margin": margin}))
+}
+
+/// Add an editable Solid Color fill at the bottom of the root stack while leaving the current
+/// product layer active for subsequent live effects and adjustments.
+fn add_background_fill(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = crate::commands::color_param(p, "color", [1.0, 1.0, 1.0, 1.0]);
+    let name = p.get("name").and_then(Value::as_str).filter(|v| !v.trim().is_empty()).unwrap_or("Studio Background").to_string();
+    let id = s.edit("Add Background Fill", |doc, _active| {
+        let layer = Layer::new(name, LayerContent::Fill(Fill::Solid(Color::rgba(c[0], c[1], c[2], c[3]))));
+        let id = layer.id;
+        doc.layers.insert(0, layer);
+        Ok(id)
+    })?;
+    Ok(json!({"layer": id.0, "editableFill": true}))
 }
 
 // ---------- matting ----------
@@ -791,6 +843,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_raster_with_mask,
             refine_subject_mask
         ),
+        spec!(
+            "layer.fitSubjectToCanvas",
+            "Fit Subject to Canvas",
+            [],
+            r##"{"margin":0..0.45=0.12,"allowUpscale":bool=false}"##,
+            has_raster_with_mask,
+            fit_subject_to_canvas
+        ),
+        spec!("layer.addBackgroundFill", "Add Background Fill", [], r##"{"color":"#rrggbb"=white,"name":text?}"##, has_doc, add_background_fill),
         spec!("layer.matting.defringe", "Defringe…", ["Layer", "Matting"], r##"{"width":1..200=1}"##, has_raster, matting_defringe),
         spec!("layer.matting.removeBlackMatte", "Remove Black Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, false)),
         spec!("layer.matting.removeWhiteMatte", "Remove White Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, true)),

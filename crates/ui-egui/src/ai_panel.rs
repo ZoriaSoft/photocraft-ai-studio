@@ -100,8 +100,20 @@ struct ProductPhotoPreset {
     steps: Vec<AiStep>,
 }
 
-/// Built-in product-photo recipes use only reviewed, non-destructive editor commands. Image-aware
-/// isolation is implemented as an editable layer mask: source pixels are never deleted.
+/// Built-in product-photo recipes stay inside the reviewed AI command boundary. Isolation,
+/// background fills and shadows remain editable; layout scaling is undoable but may resample raster pixels.
+fn product_layout_steps() -> Vec<AiStep> {
+    vec![
+        AiStep::command("Center and fit the masked product", "layer.fitSubjectToCanvas", json!({"margin": 0.12, "allowUpscale": false})),
+        AiStep::command(
+            "Add an editable soft shadow",
+            "layer.layerStyle.dropShadow",
+            json!({"color": "#000000", "opacity": 28, "angle": 90, "useGlobalLight": false, "distance": 10, "spread": 0, "size": 24}),
+        ),
+        AiStep::command("Add an editable clean background", "layer.addBackgroundFill", json!({"color": "#ffffff", "name": "Studio Background"})),
+    ]
+}
+
 fn product_photo_presets() -> Vec<ProductPhotoPreset> {
     vec![
         ProductPhotoPreset {
@@ -119,6 +131,24 @@ fn product_photo_presets() -> Vec<ProductPhotoPreset> {
                 AiStep::command("Open up the product tones", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 8, "contrast": 4})),
                 AiStep::command("Keep color natural", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 8, "saturation": 0})),
             ],
+        },
+        ProductPhotoPreset {
+            id: "catalog-hero",
+            icon: "sparkles",
+            title: "Catalog hero",
+            subtitle: "Cutout + centered layout + editable shadow",
+            steps: {
+                let mut steps = vec![
+                    AiStep::command("Detect the product and mask its background", "layer.removeBackground", json!({})),
+                    AiStep::command(
+                        "Clean the subject-mask edge",
+                        "layer.refineSubjectMask",
+                        json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
+                    ),
+                ];
+                steps.extend(product_layout_steps());
+                steps
+            },
         },
         ProductPhotoPreset {
             id: "clean-catalog",
@@ -238,6 +268,9 @@ const SAFE_COMMANDS: &[&str] = &[
     "layer.releaseClippingMask",
     "layer.removeBackground",
     "layer.refineSubjectMask",
+    "layer.fitSubjectToCanvas",
+    "layer.addBackgroundFill",
+    "layer.layerStyle.dropShadow",
     "layer.newAdjustmentLayer.brightnessContrast",
     "layer.newAdjustmentLayer.curves",
     "layer.newAdjustmentLayer.vibrance",
@@ -292,6 +325,16 @@ fn optional_number(command: &str, map: Option<&serde_json::Map<String, Value>>, 
     let Some(number) = value.as_f64() else { return Err(format!("`{command}.{key}` must be a number.")) };
     if !number.is_finite() || !(min..=max).contains(&number) {
         return Err(format!("`{command}.{key}` must be between {min} and {max}."));
+    }
+    Ok(())
+}
+
+fn optional_hex_color(command: &str, map: Option<&serde_json::Map<String, Value>>, key: &str) -> Result<(), String> {
+    let Some(value) = map.and_then(|map| map.get(key)) else { return Ok(()) };
+    let Some(color) = value.as_str() else { return Err(format!("`{command}.{key}` must be a hex color string.")) };
+    let Some(raw) = color.strip_prefix('#') else { return Err(format!("`{command}.{key}` must use #RRGGBB.")) };
+    if raw.len() != 6 || !raw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("`{command}.{key}` must use #RRGGBB."));
     }
     Ok(())
 }
@@ -361,6 +404,26 @@ fn validate_safe_params(command: &str, params: &Value) -> Result<(), String> {
             optional_number(command, map, "feather", 0.0, 1000.0)?;
             optional_number(command, map, "contrast", 0.0, 100.0)?;
             optional_number(command, map, "shiftEdge", -100.0, 100.0)
+        }
+        "layer.fitSubjectToCanvas" => {
+            only_keys(command, map, &["margin", "allowUpscale"])?;
+            optional_number(command, map, "margin", 0.0, 0.45)?;
+            optional_bool(command, map, "allowUpscale")
+        }
+        "layer.addBackgroundFill" => {
+            only_keys(command, map, &["color", "name"])?;
+            optional_hex_color(command, map, "color")?;
+            optional_name(command, map)
+        }
+        "layer.layerStyle.dropShadow" => {
+            only_keys(command, map, &["color", "opacity", "angle", "useGlobalLight", "distance", "spread", "size"])?;
+            optional_hex_color(command, map, "color")?;
+            optional_number(command, map, "opacity", 0.0, 100.0)?;
+            optional_number(command, map, "angle", -180.0, 180.0)?;
+            optional_bool(command, map, "useGlobalLight")?;
+            optional_number(command, map, "distance", 0.0, 200.0)?;
+            optional_number(command, map, "spread", 0.0, 100.0)?;
+            optional_number(command, map, "size", 0.0, 500.0)
         }
         "layer.setProps" => {
             only_keys(command, map, &["name", "visible", "opacity", "fill", "blend"])?;
@@ -490,6 +553,9 @@ pub fn planner_contract() -> Value {
             {"id": "layer.releaseClippingMask", "params": {}},
             {"id": "layer.removeBackground", "params": {}, "effect": "detect the dominant subject locally and hide the background with an editable layer mask"},
             {"id": "layer.refineSubjectMask", "params": {"radius": "optional number 0..250", "smartRadius": "optional bool", "smooth": "optional number 0..100", "feather": "optional number 0..1000", "contrast": "optional number 0..100", "shiftEdge": "optional number -100..100"}, "effect": "refine the active editable layer mask locally without changing source pixels"},
+            {"id": "layer.fitSubjectToCanvas", "params": {"margin": "optional number 0..0.45", "allowUpscale": "optional bool"}, "effect": "center and fit the active masked subject inside the canvas"},
+            {"id": "layer.addBackgroundFill", "params": {"color": "optional #RRGGBB", "name": "optional string"}, "effect": "add an editable Solid Color layer at the bottom while keeping the current layer active"},
+            {"id": "layer.layerStyle.dropShadow", "params": {"color": "optional #RRGGBB", "opacity": "0..100", "angle": "-180..180", "useGlobalLight": "optional bool", "distance": "0..200", "spread": "0..100", "size": "0..500"}, "effect": "add or replace the active layer's editable drop shadow"},
             {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "optional number -150..150", "contrast": "optional number -50..100"}},
             {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional 2..32 [input, output] pairs; each value 0..255; inputs strictly increasing"}},
             {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "optional number -100..100", "saturation": "optional number -100..100"}},
@@ -503,6 +569,7 @@ pub fn planner_contract() -> Value {
             "Prefer non-destructive adjustment layers and keep the document editable.",
             "Image-aware background isolation is allowed only through layer.removeBackground, which creates an editable mask and does not delete source pixels.",
             "Mask edge cleanup is allowed only through layer.refineSubjectMask and may operate only on the active editable layer mask.",
+            "Product layout may use layer.fitSubjectToCanvas, layer.addBackgroundFill and layer.layerStyle.dropShadow only with reviewed bounded parameters and no layer ids.",
             "Do not claim generative fill, object synthesis, export, filesystem, or network actions happened when no allowed command can perform them.",
             "Keep plans short and directly related to the user's request."
         ]
@@ -558,20 +625,32 @@ pub fn plan(prompt: &str) -> PlannedRequest {
         };
     }
 
+    if has(&[
+        "catalog layout",
+        "catalog hero",
+        "center product",
+        "center the product",
+        "product layout",
+        "white background and shadow",
+        "urun yerlesimi",
+        "urunu ortala",
+    ]) {
+        return PlannedRequest { title: "Product catalog layout".into(), steps: product_layout_steps() };
+    }
+
     if has(&["product photo", "product shot", "e-commerce", "ecommerce", "online store", "ürün foto", "urun foto", "mağaza", "magaza"]) {
-        return PlannedRequest {
-            title: "Product photo preparation".into(),
-            steps: vec![
-                AiStep::command("Detect the product and hide its background", "layer.removeBackground", json!({})),
-                AiStep::command(
-                    "Clean the product-mask edge",
-                    "layer.refineSubjectMask",
-                    json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
-                ),
-                AiStep::command("Lift tone and contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": 6})),
-                AiStep::command("Add restrained vibrance", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 16, "saturation": 2})),
-            ],
-        };
+        let mut steps = vec![
+            AiStep::command("Detect the product and hide its background", "layer.removeBackground", json!({})),
+            AiStep::command(
+                "Clean the product-mask edge",
+                "layer.refineSubjectMask",
+                json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
+            ),
+        ];
+        steps.extend(product_layout_steps());
+        steps.push(AiStep::command("Lift tone and contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": 6})));
+        steps.push(AiStep::command("Add restrained vibrance", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 16, "saturation": 2})));
+        return PlannedRequest { title: "Product photo preparation".into(), steps };
     }
 
     let mut steps = Vec::new();
@@ -1108,6 +1187,21 @@ fn step_summary(step: &AiStep) -> String {
         "layer.createClippingMask" => "Clip active layer to the layer below".into(),
         "layer.releaseClippingMask" => "Release active layer from its clipping mask".into(),
         "layer.removeBackground" => "Detect subject locally → hide background with an editable mask".into(),
+        "layer.fitSubjectToCanvas" => {
+            let margin = p.get("margin").and_then(Value::as_f64).unwrap_or(0.12);
+            let upscale = p.get("allowUpscale").and_then(Value::as_bool).unwrap_or(false);
+            format!("Center masked subject → {:.0}% canvas margin · upscale {}", margin * 100.0, if upscale { "allowed" } else { "off" })
+        }
+        "layer.addBackgroundFill" => {
+            let color = p.get("color").and_then(Value::as_str).unwrap_or("#ffffff");
+            format!("Editable background fill → {color}")
+        }
+        "layer.layerStyle.dropShadow" => {
+            let opacity = p.get("opacity").and_then(Value::as_f64).unwrap_or(75.0);
+            let distance = p.get("distance").and_then(Value::as_f64).unwrap_or(5.0);
+            let size = p.get("size").and_then(Value::as_f64).unwrap_or(5.0);
+            format!("Editable drop shadow → Opacity {opacity}% · Distance {distance}px · Size {size}px")
+        }
         "layer.refineSubjectMask" => {
             let radius = p.get("radius").and_then(Value::as_f64).unwrap_or(3.0);
             let smooth = p.get("smooth").and_then(Value::as_f64).unwrap_or(4.0);
@@ -1268,7 +1362,11 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 8.0;
     ui.add_space(2.0);
     ui.label(RichText::new("PRODUCT PHOTO PRESETS").size(9.5).color(t.text_faint).strong());
-    ui.label(RichText::new("Built-in, non-destructive looks made only from reviewed editor commands.").size(10.5).color(t.text_dim));
+    ui.label(
+        RichText::new("Built-in reviewed recipes; masks, backgrounds and shadows stay editable, while layout transforms remain undoable.")
+            .size(10.5)
+            .color(t.text_dim),
+    );
     ui.label(RichText::new("Studio cutout detects the subject locally and keeps the result editable as a layer mask.").size(9.5).color(t.text_faint));
 
     for preset in product_photo_presets() {
@@ -1439,9 +1537,9 @@ mod tests {
     }
 
     #[test]
-    fn product_photo_presets_are_safe_non_destructive_plans() {
+    fn product_photo_presets_stay_inside_the_reviewed_batch_safe_boundary() {
         let presets = product_photo_presets();
-        assert_eq!(presets.len(), 5);
+        assert_eq!(presets.len(), 6);
         let mut ids = std::collections::BTreeSet::new();
         for preset in presets {
             assert!(ids.insert(preset.id), "duplicate preset id: {}", preset.id);
@@ -1449,10 +1547,15 @@ mod tests {
             assert!(
                 preset.steps.iter().all(|step| {
                     step.command.as_deref().is_some_and(|command| {
-                        command == "layer.removeBackground" || command == "layer.refineSubjectMask" || command.starts_with("layer.newAdjustmentLayer.")
+                        command == "layer.removeBackground"
+                            || command == "layer.refineSubjectMask"
+                            || command == "layer.fitSubjectToCanvas"
+                            || command == "layer.addBackgroundFill"
+                            || command == "layer.layerStyle.dropShadow"
+                            || command.starts_with("layer.newAdjustmentLayer.")
                     })
                 }),
-                "{} should remain non-destructive and batch-safe",
+                "{} should remain reviewed and batch-safe",
                 preset.title
             );
         }
@@ -1460,7 +1563,7 @@ mod tests {
 
     #[test]
     fn product_photo_presets_execute_against_the_editor_engine() {
-        for preset in product_photo_presets().into_iter().filter(|preset| preset.id != "studio-cutout") {
+        for preset in product_photo_presets().into_iter().filter(|preset| !matches!(preset.id, "studio-cutout" | "catalog-hero")) {
             let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
             app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
             app.ui.ai.plan_title = preset.title.into();
@@ -1494,12 +1597,58 @@ mod tests {
     }
 
     #[test]
+    fn catalog_hero_executes_layout_background_and_shadow_as_one_undo() {
+        let preset = product_photo_presets().into_iter().find(|preset| preset.id == "catalog-hero").unwrap();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 200, "height": 160})).unwrap();
+        app.run("edit.fill", json!({"color": "#f5f5f5"})).unwrap();
+        app.run("select.rect", json!({"x": 35, "y": 30, "width": 70, "height": 90})).unwrap();
+        app.run("edit.fill", json!({"color": "#d83a20"})).unwrap();
+        app.run("select.deselect", json!({})).unwrap();
+        let before = app.session.active().unwrap().history.past_len();
+        app.ui.ai.plan_title = preset.title.into();
+        app.ui.ai.plan = preset.steps;
+        run_plan(&mut app);
+        assert!(!app.ui.ai.status_error, "{}", app.ui.ai.status);
+        let st = app.session.active().unwrap();
+        assert_eq!(st.history.past_len(), before + 1, "full catalog recipe stays one undo transaction");
+        assert!(st.doc.layers.iter().any(|layer| matches!(layer.content, photocraft_doc::LayerContent::Fill(_))), "editable background fill");
+        assert!(st.doc.layers.iter().any(|layer| layer.effects.items.iter().any(|fx| matches!(fx, photocraft_doc::Effect::DropShadow(_)))), "editable shadow");
+        assert!(app.session.undo());
+        assert!(!app.session.active().unwrap().doc.layers.iter().any(|layer| matches!(layer.content, photocraft_doc::LayerContent::Fill(_))));
+    }
+
+    #[test]
     fn product_workflow_uses_real_image_aware_isolation() {
         let p = plan("Prepare this product photo for an online store");
         assert!(validate(&p.steps).is_ok());
         assert_eq!(p.steps.first().and_then(|s| s.command.as_deref()), Some("layer.removeBackground"));
         assert_eq!(p.steps.get(1).and_then(|s| s.command.as_deref()), Some("layer.refineSubjectMask"));
+        for required in ["layer.fitSubjectToCanvas", "layer.layerStyle.dropShadow", "layer.addBackgroundFill"] {
+            assert!(p.steps.iter().any(|s| s.command.as_deref() == Some(required)), "missing {required}");
+        }
         assert!(p.steps.iter().all(|s| s.command.is_some()));
+    }
+
+    #[test]
+    fn product_layout_intent_uses_bounded_editable_helpers() {
+        let p = plan("Catalog layout with a centered product");
+        assert_eq!(p.steps.len(), 3);
+        assert_eq!(p.steps[0].command.as_deref(), Some("layer.fitSubjectToCanvas"));
+        assert_eq!(p.steps[1].command.as_deref(), Some("layer.layerStyle.dropShadow"));
+        assert_eq!(p.steps[2].command.as_deref(), Some("layer.addBackgroundFill"));
+        assert!(validate(&p.steps).is_ok());
+
+        for bad in [
+            AiStep::command("Unsafe target", "layer.fitSubjectToCanvas", json!({"layer": 9, "margin": 0.1})),
+            AiStep::command("Too much margin", "layer.fitSubjectToCanvas", json!({"margin": 0.8})),
+            AiStep::command("Bad background", "layer.addBackgroundFill", json!({"color": "white"})),
+            AiStep::command("Bare hex background", "layer.addBackgroundFill", json!({"color": "ffffff"})),
+            AiStep::command("Unsafe shadow target", "layer.layerStyle.dropShadow", json!({"layer": 9})),
+            AiStep::command("Huge shadow", "layer.layerStyle.dropShadow", json!({"size": 501})),
+        ] {
+            assert!(validate(&[bad]).is_err());
+        }
     }
 
     #[test]

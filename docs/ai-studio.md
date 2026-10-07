@@ -61,7 +61,7 @@ Executable AI plans run as one history transaction. The shell injects an interna
 
 ## Product Photo Presets V2
 
-The Workflows tab includes five deterministic product-photo presets: **Studio cutout**, **Clean catalog**, **Marketplace crisp**, **Soft luxury**, and **Monochrome detail**. These are not prompt templates; each expands directly into a reviewed editor plan so the user can inspect the exact mask and adjustment steps before applying it.
+The Workflows tab includes six deterministic product-photo presets: **Studio cutout**, **Catalog hero**, **Clean catalog**, **Marketplace crisp**, **Soft luxury**, and **Monochrome detail**. These are not prompt templates; each expands directly into a reviewed editor plan so the user can inspect the exact mask and adjustment steps before applying it.
 
 **Studio cutout** is the first image-aware preset. `layer.removeBackground` runs the engine's local subject segmentation against the active raster layer and writes the result as an editable grayscale layer mask. It does not erase source pixels, upload document pixels, or call a remote vision service. The same command is available from the raster layer's Properties > Quick Actions surface.
 
@@ -73,4 +73,10 @@ AI Studio can now refine an existing editable subject mask with the editor's loc
 
 The command stays inside the same allowlist and parameter validator as other AI Studio actions. Model plans cannot target arbitrary layer IDs or send out-of-range refinement values. Refined masks remain editable, undoable, saveable as workflows and safe to use in folder batches. **Studio cutout** and the general product-photo plan now include a restrained cleanup pass immediately after local subject isolation.
 
-Image-aware V2 still does **not** claim generative fill, synthesized shadows, automatic subject repositioning, or semantic object replacement. Those remain separate future capabilities.
+### Product layout helpers
+
+**Catalog hero** adds a reviewed product-layout pass after local cutout and edge cleanup. `layer.fitSubjectToCanvas` reads the editable mask bounds, preserves aspect ratio, and centers/fits the masked subject inside a bounded canvas margin. Raster scaling is undoable but can resample pixels; AI Studio does not describe it as a non-destructive transform.
+
+The same plan can add a white or colored background through `layer.addBackgroundFill`, which creates an editable Solid Color fill at the bottom of the root layer stack while keeping the product layer active. A soft shadow is added with PhotoCraft's existing live `layer.layerStyle.dropShadow` effect, so opacity, distance and blur size remain editable. Model-generated layout plans cannot supply layer IDs, arbitrary effect fields, invalid colors or out-of-range layout/shadow values. These commands are available to saved workflows and folder batches through the same validator and one-Undo execution boundary.
+
+Image-aware V2 still does **not** claim generative fill, semantic object replacement, scene-aware relighting, or perspective-aware ground-shadow synthesis. The current layout helper uses deterministic centering/scaling and an editable layer-style shadow rather than generative scene reconstruction.
