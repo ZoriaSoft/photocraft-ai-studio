@@ -370,6 +370,24 @@ fn mask_all_objects_masks_the_subject() {
 }
 
 #[test]
+fn remove_background_creates_an_editable_non_destructive_mask() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |x, y| {
+        let inside = (((x - 20) * (x - 20) + (y - 15) * (y - 15)) as f32).sqrt() < 8.0;
+        if inside { [0.85, 0.18, 0.08, 1.0] } else { [0.96, 0.96, 0.96, 1.0] }
+    });
+    let before = active(&s).surface().unwrap().read_region(s.active().unwrap().doc.bounds());
+    let r = s.execute("layer.removeBackground", json!({})).unwrap();
+    assert_eq!(r["editableMask"], true);
+    let layer = active(&s);
+    let mask = layer.mask.as_ref().expect("editable subject mask");
+    assert!(mask.value(20, 15) > mask.value(1, 1), "subject revealed, background hidden");
+    assert_eq!(layer.surface().unwrap().read_region(s.active().unwrap().doc.bounds()), before, "source pixels stay untouched");
+    assert!(s.undo());
+    assert!(active(&s).mask.is_none(), "one undo restores the unmasked source layer");
+}
+
+#[test]
 fn layer_masks_in_gray_cmyk_lab() {
     for mode in ["gray", "cmyk", "lab"] {
         let mut s = session(16, mode);

@@ -67,9 +67,9 @@ fn quick_actions_fit_the_layer_kind() {
             "pixel" => assert!(all.contains(&"select.subject")),
             _ => assert!(!all.contains(&"select.subject"), "{kind}: Select Subject is for pixel layers"),
         }
-        // Every listed command exists, except ones not implemented yet (filtered when shown).
+        // Every listed Quick Action must be backed by a real command.
         for id in &all {
-            assert!(crate::menus::is_live(id) || *id == "layer.removeBackground", "{kind}: {id} is not a command");
+            assert!(crate::menus::is_live(id), "{kind}: {id} is not a command");
         }
     }
     let ty = app.session.active().unwrap().doc.layers.iter().find(|l| matches!(l.content, LayerContent::Text(_))).unwrap().content.clone();

@@ -17,7 +17,7 @@ The AI Studio turns natural-language intent into reviewed, deterministic editor 
   <img src="docs/images/ai-studio-workflows.png" alt="AI Studio saved workflows and batch controls" width="49%">
 </p>
 
-<sub>Left: human-readable plan review with editable adjustment steps and one-Undo semantics. Right: reusable saved workflows with non-destructive Batch Workflows V1.</sub>
+<sub>Left: image-aware product preparation with local subject masking and one-Undo semantics. Right: built-in product presets plus reusable workflows and safe folder batches.</sub>
 
 ## Product direction
 
@@ -71,11 +71,18 @@ Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 - [x] Atomic multi-step AI actions: one Undo, automatic rollback on failure.
 - [x] Save a validated command sequence as a reusable workflow.
 
+### AI Studio V2
+
+- [x] Image-aware subject detection through the local editor engine; document pixels stay on-device.
+- [x] Non-destructive background removal as an editable layer mask, available to plans, presets and saved/batch workflows.
+- [ ] AI-assisted mask refinement / edge cleanup controls.
+- [ ] Product layout helpers: clean background, centering/scaling and editable soft shadow.
+
 ### Creative Studio MVP
 
 - [x] Open PNG, JPEG, WebP and PSD documents.
 - [x] Core layer / mask / text operations.
-- [x] Product-photo workflow presets (safe built-in adjustment recipes).
+- [x] Product-photo workflow presets (including local subject detection + editable background masking).
 - [x] Batch workflow execution from saved workflows (desktop V1: source folder → safe PNG copies).
 - [x] Export PNG, JPEG, WebP and PSD (WebP is lossless; PSD keeps layers).
 

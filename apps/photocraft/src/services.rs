@@ -534,6 +534,55 @@ mod ai_tests {
         assert!(output.join("source-ai.png").is_file());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn image_aware_batch_cutout_writes_transparent_background_copy() {
+        use photocraft_engine::Session;
+        use photocraft_ui_egui::ai_panel::{AiBatchRequest, AiStep, AiWorkflow};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("photocraft-ai-cutout-{}-{unique}", std::process::id()));
+        let input = root.join("input");
+        let output = root.join("output");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+
+        let mut source_session = Session::new();
+        source_session.execute("file.new", serde_json::json!({"width": 200, "height": 160})).unwrap();
+        source_session.execute("edit.fill", serde_json::json!({"color": "#f5f5f5"})).unwrap();
+        source_session.execute("select.rect", serde_json::json!({"x": 60, "y": 40, "width": 80, "height": 80})).unwrap();
+        source_session.execute("edit.fill", serde_json::json!({"color": "#d83a20"})).unwrap();
+        source_session.execute("select.deselect", serde_json::json!({})).unwrap();
+        let source_doc = source_session.active().unwrap().doc.clone();
+        let source_bytes = photocraft_io::export(source_doc.as_ref(), "source.png", &photocraft_io::ExportOptions::default()).unwrap().bytes;
+        let source = input.join("source.png");
+        std::fs::write(&source, &source_bytes).unwrap();
+
+        let workflow = AiWorkflow {
+            name: "Studio cutout".into(),
+            steps: vec![AiStep {
+                label: "Detect the product and hide its background".into(),
+                command: Some("layer.removeBackground".into()),
+                params: serde_json::json!({}),
+                note: String::new(),
+            }],
+        };
+        let result =
+            run_ai_batch(AiBatchRequest { workflow, input_dir: input.to_string_lossy().to_string(), output_dir: output.to_string_lossy().to_string() })
+                .unwrap();
+        assert_eq!((result.succeeded, result.failed), (1, 0));
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes, "batch never mutates the source");
+
+        let out = std::fs::read(output.join("source-ai.png")).unwrap();
+        let cutout = photocraft_io::import("source-ai.png", &out).unwrap().document;
+        let flat = photocraft_compose::flatten(&cutout);
+        let width = cutout.size.width as usize;
+        let corner_alpha = flat.px[0][3];
+        let center_alpha = flat.px[80 * width + 100][3];
+        assert!(center_alpha > corner_alpha + 0.5, "detected product should stay visible while the background becomes transparent");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]

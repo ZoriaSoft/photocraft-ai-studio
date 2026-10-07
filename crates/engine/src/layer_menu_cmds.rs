@@ -186,10 +186,9 @@ fn hide_selection(s: &mut Session, p: &Value) -> Result<Value> {
     })
 }
 
-/// Layer › Mask All Objects: detects the main objects (the Select › Subject segmentation over the
-/// layer, or the composite for non-pixel layers) and masks the layer to them. Photoshop makes one
-/// group per object; here the objects share one mask.
-fn mask_all_objects(s: &mut Session, p: &Value) -> Result<Value> {
+/// Detect the dominant subject over the layer (or composite for non-pixel content) and attach the
+/// segmentation result as an editable mask. Background layers are promoted before receiving a mask.
+fn mask_detected_subject(s: &mut Session, p: &Value, history_label: &str) -> Result<Value> {
     let id = layer_param(s, p)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let doc = d.doc.clone();
@@ -208,17 +207,29 @@ fn mask_all_objects(s: &mut Session, p: &Value) -> Result<Value> {
             photocraft_algo::segment::subject::select_subject(&Composite(&doc), doc.bounds())
         }
     };
-    let region = region.ok_or_else(|| other("no objects were found"))?;
+    let region = region.ok_or_else(|| other("no subject was found"))?;
     let bbox = region.bbox;
-    s.edit("Mask All Objects", |doc, _| {
+    s.edit(history_label, |doc, _| {
         let mut mask = LayerMask::hide_all();
         let v: Vec<f32> = region.mask.iter().map(|m| f32::from(*m) / 255.0).collect();
         mask.surface.write_region(bbox, &v);
         mask.surface.prune();
+        crate::extra_cmds::background_to_layer_for_mask(doc, id);
         doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
         Ok(())
     })?;
-    Ok(json!({"bounds": [bbox.x0, bbox.y0, bbox.width(), bbox.height()]}))
+    Ok(json!({"bounds": [bbox.x0, bbox.y0, bbox.width(), bbox.height()], "layer": id.0, "editableMask": true}))
+}
+
+/// Layer › Mask All Objects: detect the main visible subject(s) and mask the layer to them.
+fn mask_all_objects(s: &mut Session, p: &Value) -> Result<Value> {
+    mask_detected_subject(s, p, "Mask All Objects")
+}
+
+/// Detect the dominant subject and hide its background with an editable layer mask. No source
+/// pixels are deleted, so the result can be refined manually and undone like any normal edit.
+fn remove_background(s: &mut Session, p: &Value) -> Result<Value> {
+    mask_detected_subject(s, p, "Remove Background")
 }
 
 // ---------- matting ----------
@@ -730,6 +741,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("layer.layerMask.fromTransparency", "From Transparency", ["Layer", "Layer Mask"], r##"{"layer":id?}"##, has_raster, mask_from_transparency),
         spec!("layer.layerMask.hideSelection", "Hide Selection", ["Layer", "Layer Mask"], r##"{"layer":id?}"##, has_selection_layer, hide_selection),
         spec!("layer.maskAllObjects", "Mask All Objects", ["Layer"], r##"{"layer":id?}"##, has_layer, mask_all_objects),
+        spec!("layer.removeBackground", "Remove Background", [], "{}", has_raster, remove_background),
         spec!("layer.matting.defringe", "Defringe…", ["Layer", "Matting"], r##"{"width":1..200=1}"##, has_raster, matting_defringe),
         spec!("layer.matting.removeBlackMatte", "Remove Black Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, false)),
         spec!("layer.matting.removeWhiteMatte", "Remove White Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, true)),

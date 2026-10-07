@@ -88,7 +88,7 @@ fn main() {
             }
             match ai_demo_for_app.as_deref() {
                 Some("assistant") => {
-                    let prompt = "Make this brighter with a little more contrast and vibrance";
+                    let prompt = "Prepare this product photo for an online store";
                     let planned = photocraft_ui_egui::ai_panel::plan(prompt);
                     app.ui.panels.ai = true;
                     app.ui.ai.tab = 0;

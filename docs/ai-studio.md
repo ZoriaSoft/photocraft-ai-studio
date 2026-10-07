@@ -59,10 +59,12 @@ Before execution, AI Studio presents each step in editor language rather than ex
 
 Executable AI plans run as one history transaction. The shell injects an internal coalescing key only after the plan has passed validation, so model output and saved workflows cannot control history grouping. A successful multi-step plan appears as one `AI Plan: ?` undo state. If any later step fails, AI Studio automatically undoes the already-applied steps, removes the failed plan from redo history, and restores the command journal to its pre-plan state.
 
-## Product Photo Presets V1
+## Product Photo Presets V2
 
-The Workflows tab includes four deterministic product-photo presets: **Clean catalog**, **Marketplace crisp**, **Soft luxury**, and **Monochrome detail**. These presets are not prompt templates; each expands directly into a reviewed editor plan so the user can inspect the exact adjustment layers before applying it.
+The Workflows tab includes five deterministic product-photo presets: **Studio cutout**, **Clean catalog**, **Marketplace crisp**, **Soft luxury**, and **Monochrome detail**. These are not prompt templates; each expands directly into a reviewed editor plan so the user can inspect the exact mask and adjustment steps before applying it.
 
-All V1 product presets are intentionally non-destructive and batch-safe. They use only brightness/contrast, curves, vibrance, and black-and-white adjustment layers already covered by the AI safety boundary. A preset therefore gets the same validation, plan review, atomic one-Undo execution, saved-workflow support, and folder-batch compatibility as any other executable AI plan.
+**Studio cutout** is the first image-aware preset. `layer.removeBackground` runs the engine's local subject segmentation against the active raster layer and writes the result as an editable grayscale layer mask. It does not erase source pixels, upload document pixels, or call a remote vision service. The same command is available from the raster layer's Properties > Quick Actions surface.
 
-V1 does **not** claim to remove a background, isolate a product, synthesize shadows, or reposition a subject. Those operations require image-aware selection or generation capabilities that are not yet part of the reviewed command surface. The general product-photo natural-language request continues to show subject isolation as pending rather than pretending it happened.
+The general product-photo request now uses that real isolation command followed by restrained tonal adjustments. Direct requests such as “Remove the background” or “Arka planı kaldır” create a single reviewed background-isolation step rather than adding unrelated styling. Because the command is inside the same validator boundary, the result keeps plan review, atomic one-Undo execution, saved-workflow support and folder-batch compatibility. If segmentation cannot find a subject, the command fails without writing an output; an AI multi-step plan rolls back atomically.
+
+Image-aware V2 still does **not** claim generative fill, synthesized shadows, automatic subject repositioning, or semantic object replacement. Those remain separate future capabilities.

@@ -88,11 +88,21 @@ struct ProductPhotoPreset {
     steps: Vec<AiStep>,
 }
 
-/// Built-in product-photo recipes intentionally use only reviewed, non-destructive adjustment
-/// commands. They do not pretend to remove backgrounds or isolate subjects: those operations need
-/// image-aware capabilities that are outside the current safe command surface.
+/// Built-in product-photo recipes use only reviewed, non-destructive editor commands. Image-aware
+/// isolation is implemented as an editable layer mask: source pixels are never deleted.
 fn product_photo_presets() -> Vec<ProductPhotoPreset> {
     vec![
+        ProductPhotoPreset {
+            id: "studio-cutout",
+            icon: "layers",
+            title: "Studio cutout",
+            subtitle: "Detect subject + editable background mask",
+            steps: vec![
+                AiStep::command("Detect the product and mask its background", "layer.removeBackground", json!({})),
+                AiStep::command("Open up the product tones", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 8, "contrast": 4})),
+                AiStep::command("Keep color natural", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 8, "saturation": 0})),
+            ],
+        },
         ProductPhotoPreset {
             id: "clean-catalog",
             icon: "sparkles",
@@ -209,6 +219,7 @@ const SAFE_COMMANDS: &[&str] = &[
     "layer.arrange.sendToBack",
     "layer.createClippingMask",
     "layer.releaseClippingMask",
+    "layer.removeBackground",
     "layer.newAdjustmentLayer.brightnessContrast",
     "layer.newAdjustmentLayer.curves",
     "layer.newAdjustmentLayer.vibrance",
@@ -321,6 +332,7 @@ fn validate_safe_params(command: &str, params: &Value) -> Result<(), String> {
         | "layer.arrange.sendToBack"
         | "layer.createClippingMask"
         | "layer.releaseClippingMask"
+        | "layer.removeBackground"
         | "layer.newAdjustmentLayer.blackWhite"
         | "layer.newAdjustmentLayer.invert" => no_params(command, map),
         "layer.setProps" => {
@@ -449,6 +461,7 @@ pub fn planner_contract() -> Value {
             {"id": "layer.arrange.sendToBack", "params": {}},
             {"id": "layer.createClippingMask", "params": {}},
             {"id": "layer.releaseClippingMask", "params": {}},
+            {"id": "layer.removeBackground", "params": {}, "effect": "detect the dominant subject locally and hide the background with an editable layer mask"},
             {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "optional number -150..150", "contrast": "optional number -50..100"}},
             {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional 2..32 [input, output] pairs; each value 0..255; inputs strictly increasing"}},
             {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "optional number -100..100", "saturation": "optional number -100..100"}},
@@ -460,7 +473,8 @@ pub fn planner_contract() -> Value {
             "Never invent a command id or parameter. Use null when the request needs a capability outside the allowed commands.",
             "Never send a layer id. All allowed layer commands intentionally operate on the active layer or current selection.",
             "Prefer non-destructive adjustment layers and keep the document editable.",
-            "Do not claim a vision, selection, delete, export, filesystem, or network action happened when no allowed command can perform it.",
+            "Image-aware background isolation is allowed only through layer.removeBackground, which creates an editable mask and does not delete source pixels.",
+            "Do not claim generative fill, object synthesis, export, filesystem, or network actions happened when no allowed command can perform them.",
             "Keep plans short and directly related to the user's request."
         ]
     })
@@ -476,11 +490,30 @@ pub fn plan(prompt: &str) -> PlannedRequest {
     let q = p.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| q.contains(needle));
 
+    if has(&[
+        "remove background",
+        "remove the background",
+        "background removal",
+        "isolate subject",
+        "isolate the subject",
+        "arka planı kaldır",
+        "arka plani kaldir",
+        "arka planı sil",
+        "arka plani sil",
+        "fonu kaldır",
+        "fonu kaldir",
+    ]) {
+        return PlannedRequest {
+            title: "Background isolation".into(),
+            steps: vec![AiStep::command("Detect the subject and hide its background", "layer.removeBackground", json!({}))],
+        };
+    }
+
     if has(&["product photo", "product shot", "e-commerce", "ecommerce", "online store", "ürün foto", "urun foto", "mağaza", "magaza"]) {
         return PlannedRequest {
             title: "Product photo preparation".into(),
             steps: vec![
-                AiStep::pending("Isolate the product", "Subject isolation will be enabled when the vision backend is connected."),
+                AiStep::command("Detect the product and hide its background", "layer.removeBackground", json!({})),
                 AiStep::command("Lift tone and contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": 6})),
                 AiStep::command("Add restrained vibrance", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 16, "saturation": 2})),
             ],
@@ -1020,6 +1053,7 @@ fn step_summary(step: &AiStep) -> String {
         "layer.arrange.sendToBack" => "Active layer ? bottom of its stack".into(),
         "layer.createClippingMask" => "Clip active layer to the layer below".into(),
         "layer.releaseClippingMask" => "Release active layer from its clipping mask".into(),
+        "layer.removeBackground" => "Detect subject locally → hide background with an editable mask".into(),
         "layer.newAdjustmentLayer.brightnessContrast" => {
             let b = p.get("brightness").and_then(Value::as_f64).unwrap_or(0.0);
             let c = p.get("contrast").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1172,8 +1206,8 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.y = 8.0;
     ui.add_space(2.0);
     ui.label(RichText::new("PRODUCT PHOTO PRESETS").size(9.5).color(t.text_faint).strong());
-    ui.label(RichText::new("Built-in, non-destructive looks made only from reviewed adjustment commands.").size(10.5).color(t.text_dim));
-    ui.label(RichText::new("Background removal and subject isolation stay explicit until image-aware tools are connected.").size(9.5).color(t.text_faint));
+    ui.label(RichText::new("Built-in, non-destructive looks made only from reviewed editor commands.").size(10.5).color(t.text_dim));
+    ui.label(RichText::new("Studio cutout detects the subject locally and keeps the result editable as a layer mask.").size(9.5).color(t.text_faint));
 
     for preset in product_photo_presets() {
         if workflow_card(ui, &t, preset.icon, preset.title, preset.subtitle) {
@@ -1292,13 +1326,15 @@ mod tests {
     #[test]
     fn product_photo_presets_are_safe_non_destructive_plans() {
         let presets = product_photo_presets();
-        assert_eq!(presets.len(), 4);
+        assert_eq!(presets.len(), 5);
         let mut ids = std::collections::BTreeSet::new();
         for preset in presets {
             assert!(ids.insert(preset.id), "duplicate preset id: {}", preset.id);
             assert!(validate(&preset.steps).is_ok(), "{} must stay inside the reviewed AI boundary", preset.title);
             assert!(
-                preset.steps.iter().all(|step| step.command.as_deref().is_some_and(|command| command.starts_with("layer.newAdjustmentLayer."))),
+                preset.steps.iter().all(|step| {
+                    step.command.as_deref().is_some_and(|command| command == "layer.removeBackground" || command.starts_with("layer.newAdjustmentLayer."))
+                }),
                 "{} should remain non-destructive and batch-safe",
                 preset.title
             );
@@ -1307,7 +1343,7 @@ mod tests {
 
     #[test]
     fn product_photo_presets_execute_against_the_editor_engine() {
-        for preset in product_photo_presets() {
+        for preset in product_photo_presets().into_iter().filter(|preset| preset.id != "studio-cutout") {
             let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
             app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
             app.ui.ai.plan_title = preset.title.into();
@@ -1319,19 +1355,44 @@ mod tests {
     }
 
     #[test]
-    fn product_photo_presets_do_not_claim_unavailable_background_work() {
-        for preset in product_photo_presets() {
-            let text = format!("{} {}", preset.title, preset.subtitle).to_ascii_lowercase();
-            assert!(!text.contains("remove background"));
-            assert!(!text.contains("isolate"));
-        }
+    fn studio_cutout_executes_image_aware_masking_as_one_undo() {
+        let preset = product_photo_presets().into_iter().find(|preset| preset.id == "studio-cutout").unwrap();
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 200, "height": 160})).unwrap();
+        app.run("edit.fill", json!({"color": "#f5f5f5"})).unwrap();
+        app.run("select.rect", json!({"x": 60, "y": 40, "width": 80, "height": 80})).unwrap();
+        app.run("edit.fill", json!({"color": "#d83a20"})).unwrap();
+        app.run("select.deselect", json!({})).unwrap();
+        let state = app.session.active().unwrap();
+        let product_layer = state.active_layer.expect("active product layer");
+        let history_before = state.history.past_len();
+        app.ui.ai.plan_title = preset.title.into();
+        app.ui.ai.plan = preset.steps;
+        run_plan(&mut app);
+        assert!(!app.ui.ai.status_error, "{}", app.ui.ai.status);
+        assert!(app.session.active().unwrap().doc.layer(product_layer).and_then(|layer| layer.mask.as_ref()).is_some());
+        assert_eq!(app.session.active().unwrap().history.past_len(), history_before + 1, "the whole image-aware preset stays one undo transaction");
+        assert!(app.session.undo());
+        assert!(app.session.active().unwrap().doc.layer(product_layer).and_then(|layer| layer.mask.as_ref()).is_none());
     }
 
     #[test]
-    fn product_workflow_waits_for_vision_instead_of_faking_it() {
+    fn product_workflow_uses_real_image_aware_isolation() {
         let p = plan("Prepare this product photo for an online store");
-        assert!(p.steps.iter().any(|s| s.command.is_none()));
-        assert!(validate(&p.steps).is_err());
+        assert!(validate(&p.steps).is_ok());
+        assert_eq!(p.steps.first().and_then(|s| s.command.as_deref()), Some("layer.removeBackground"));
+        assert!(p.steps.iter().all(|s| s.command.is_some()));
+    }
+
+    #[test]
+    fn background_removal_intent_is_a_single_editable_mask_step() {
+        for prompt in ["Remove the background", "Arka planı kaldır"] {
+            let p = plan(prompt);
+            assert_eq!(p.steps.len(), 1, "{prompt}");
+            assert_eq!(p.steps[0].command.as_deref(), Some("layer.removeBackground"), "{prompt}");
+            assert!(validate(&p.steps).is_ok(), "{prompt}");
+        }
+        assert!(validate(&[AiStep::command("Unsafe targeted cutout", "layer.removeBackground", json!({"layer": 42}))]).is_err());
     }
 
     #[test]
