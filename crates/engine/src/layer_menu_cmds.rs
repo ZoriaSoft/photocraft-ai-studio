@@ -3,6 +3,7 @@
 //! Options / Global Light / Create Layer / Scale Effects, Layer Content Options, and exporting
 //! just the active layer (Quick Export as PNG, Export As).
 
+use photocraft_algo::matting::RefineParams;
 use photocraft_algo::selection::Region;
 use photocraft_color::{BlendMode, ColorMode};
 use photocraft_doc::{BlendIf, BlendRange, Document, Effect, Layer, LayerContent, LayerId, LayerMask, SmartSource, StackMode};
@@ -230,6 +231,46 @@ fn mask_all_objects(s: &mut Session, p: &Value) -> Result<Value> {
 /// pixels are deleted, so the result can be refined manually and undone like any normal edit.
 fn remove_background(s: &mut Session, p: &Value) -> Result<Value> {
     mask_detected_subject(s, p, "Remove Background")
+}
+
+/// Refine an existing subject/background mask with the editor's local Select and Mask algorithm.
+/// The raster pixels remain untouched; only the editable layer-mask surface is replaced.
+fn refine_subject_mask(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = layer_param(s, p)?;
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    let doc = d.doc.clone();
+    let layer = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+    let surface = layer.surface().ok_or_else(|| other(format!("the active layer is a {} layer without pixels", layer.content.kind_name())))?;
+    let mask = layer.mask.as_ref().ok_or_else(|| other("the active layer has no layer mask"))?;
+    let content = mask.surface.content_bounds();
+    if content.is_empty() {
+        return Err(other("the active layer mask has no visible subject to refine"));
+    }
+    let params = RefineParams {
+        radius: num(p, "radius", 3.0).clamp(0.0, 250.0),
+        smart_radius: p.get("smartRadius").and_then(Value::as_bool).unwrap_or(true),
+        smooth: num(p, "smooth", 4.0).clamp(0.0, 100.0),
+        feather: num(p, "feather", 0.5).clamp(0.0, 1000.0),
+        contrast: num(p, "contrast", 10.0).clamp(0.0, 100.0),
+        shift_edge: num(p, "shiftEdge", -2.0).clamp(-100.0, 100.0),
+    };
+    let refined = photocraft_algo::matting::refine_mask(
+        &photocraft_algo::segment::SurfaceSampler(surface),
+        &photocraft_algo::matting::surface_reader(&mask.surface),
+        content,
+        doc.bounds(),
+        &params,
+    )
+    .ok_or_else(|| other("mask refinement produced an empty subject"))?;
+    let bbox = refined.bbox;
+    let next_surface = photocraft_algo::matting::region_surface(&refined);
+    s.edit("Refine Subject Mask", |doc, _| {
+        let layer = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
+        let mask = layer.mask.as_mut().ok_or_else(|| other("the active layer has no layer mask"))?;
+        mask.surface = next_surface;
+        Ok(())
+    })?;
+    Ok(json!({"bounds": [bbox.x0, bbox.y0, bbox.width(), bbox.height()], "layer": id.0, "editableMask": true, "refined": true}))
 }
 
 // ---------- matting ----------
@@ -742,6 +783,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("layer.layerMask.hideSelection", "Hide Selection", ["Layer", "Layer Mask"], r##"{"layer":id?}"##, has_selection_layer, hide_selection),
         spec!("layer.maskAllObjects", "Mask All Objects", ["Layer"], r##"{"layer":id?}"##, has_layer, mask_all_objects),
         spec!("layer.removeBackground", "Remove Background", [], "{}", has_raster, remove_background),
+        spec!(
+            "layer.refineSubjectMask",
+            "Refine Subject Mask",
+            [],
+            r##"{"layer":id?,"radius":px=3,"smartRadius":bool=true,"smooth":0..100=4,"feather":px=0.5,"contrast":0..100=10,"shiftEdge":-100..100=-2}"##,
+            has_raster_with_mask,
+            refine_subject_mask
+        ),
         spec!("layer.matting.defringe", "Defringe…", ["Layer", "Matting"], r##"{"width":1..200=1}"##, has_raster, matting_defringe),
         spec!("layer.matting.removeBlackMatte", "Remove Black Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, false)),
         spec!("layer.matting.removeWhiteMatte", "Remove White Matte", ["Layer", "Matting"], "{}", has_raster, |s, _| remove_matte(s, true)),

@@ -29,6 +29,12 @@ pub struct AiPanelState {
     pub saved_workflows: Vec<AiWorkflow>,
     #[serde(skip)]
     pub workflow_name: String,
+    pub mask_refine_radius: f32,
+    pub mask_refine_smart_radius: bool,
+    pub mask_refine_smooth: f32,
+    pub mask_refine_feather: f32,
+    pub mask_refine_contrast: f32,
+    pub mask_refine_shift_edge: f32,
 }
 
 impl Default for AiPanelState {
@@ -43,6 +49,12 @@ impl Default for AiPanelState {
             recent_prompts: Vec::new(),
             saved_workflows: Vec::new(),
             workflow_name: String::new(),
+            mask_refine_radius: 3.0,
+            mask_refine_smart_radius: true,
+            mask_refine_smooth: 4.0,
+            mask_refine_feather: 0.5,
+            mask_refine_contrast: 10.0,
+            mask_refine_shift_edge: -2.0,
         }
     }
 }
@@ -99,6 +111,11 @@ fn product_photo_presets() -> Vec<ProductPhotoPreset> {
             subtitle: "Detect subject + editable background mask",
             steps: vec![
                 AiStep::command("Detect the product and mask its background", "layer.removeBackground", json!({})),
+                AiStep::command(
+                    "Clean the subject-mask edge",
+                    "layer.refineSubjectMask",
+                    json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
+                ),
                 AiStep::command("Open up the product tones", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 8, "contrast": 4})),
                 AiStep::command("Keep color natural", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 8, "saturation": 0})),
             ],
@@ -220,6 +237,7 @@ const SAFE_COMMANDS: &[&str] = &[
     "layer.createClippingMask",
     "layer.releaseClippingMask",
     "layer.removeBackground",
+    "layer.refineSubjectMask",
     "layer.newAdjustmentLayer.brightnessContrast",
     "layer.newAdjustmentLayer.curves",
     "layer.newAdjustmentLayer.vibrance",
@@ -335,6 +353,15 @@ fn validate_safe_params(command: &str, params: &Value) -> Result<(), String> {
         | "layer.removeBackground"
         | "layer.newAdjustmentLayer.blackWhite"
         | "layer.newAdjustmentLayer.invert" => no_params(command, map),
+        "layer.refineSubjectMask" => {
+            only_keys(command, map, &["radius", "smartRadius", "smooth", "feather", "contrast", "shiftEdge"])?;
+            optional_number(command, map, "radius", 0.0, 250.0)?;
+            optional_bool(command, map, "smartRadius")?;
+            optional_number(command, map, "smooth", 0.0, 100.0)?;
+            optional_number(command, map, "feather", 0.0, 1000.0)?;
+            optional_number(command, map, "contrast", 0.0, 100.0)?;
+            optional_number(command, map, "shiftEdge", -100.0, 100.0)
+        }
         "layer.setProps" => {
             only_keys(command, map, &["name", "visible", "opacity", "fill", "blend"])?;
             if map.is_none_or(serde_json::Map::is_empty) {
@@ -462,6 +489,7 @@ pub fn planner_contract() -> Value {
             {"id": "layer.createClippingMask", "params": {}},
             {"id": "layer.releaseClippingMask", "params": {}},
             {"id": "layer.removeBackground", "params": {}, "effect": "detect the dominant subject locally and hide the background with an editable layer mask"},
+            {"id": "layer.refineSubjectMask", "params": {"radius": "optional number 0..250", "smartRadius": "optional bool", "smooth": "optional number 0..100", "feather": "optional number 0..1000", "contrast": "optional number 0..100", "shiftEdge": "optional number -100..100"}, "effect": "refine the active editable layer mask locally without changing source pixels"},
             {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "optional number -150..150", "contrast": "optional number -50..100"}},
             {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional 2..32 [input, output] pairs; each value 0..255; inputs strictly increasing"}},
             {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "optional number -100..100", "saturation": "optional number -100..100"}},
@@ -474,6 +502,7 @@ pub fn planner_contract() -> Value {
             "Never send a layer id. All allowed layer commands intentionally operate on the active layer or current selection.",
             "Prefer non-destructive adjustment layers and keep the document editable.",
             "Image-aware background isolation is allowed only through layer.removeBackground, which creates an editable mask and does not delete source pixels.",
+            "Mask edge cleanup is allowed only through layer.refineSubjectMask and may operate only on the active editable layer mask.",
             "Do not claim generative fill, object synthesis, export, filesystem, or network actions happened when no allowed command can perform them.",
             "Keep plans short and directly related to the user's request."
         ]
@@ -490,7 +519,9 @@ pub fn plan(prompt: &str) -> PlannedRequest {
     let q = p.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|needle| q.contains(needle));
 
-    if has(&[
+    let wants_mask_refine =
+        has(&["refine mask", "refine the mask", "clean mask edges", "clean up mask edges", "edge cleanup", "maskeyi iyilestir", "maske kenarlarini temizle"]);
+    let wants_background_removal = has(&[
         "remove background",
         "remove the background",
         "background removal",
@@ -502,7 +533,25 @@ pub fn plan(prompt: &str) -> PlannedRequest {
         "arka plani sil",
         "fonu kaldır",
         "fonu kaldir",
-    ]) {
+    ]);
+    let refine_step = || {
+        AiStep::command(
+            "Refine the active subject-mask edge",
+            "layer.refineSubjectMask",
+            json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
+        )
+    };
+
+    if wants_background_removal && wants_mask_refine {
+        return PlannedRequest {
+            title: "Background isolation and edge cleanup".into(),
+            steps: vec![AiStep::command("Detect the subject and hide its background", "layer.removeBackground", json!({})), refine_step()],
+        };
+    }
+    if wants_mask_refine {
+        return PlannedRequest { title: "Mask edge cleanup".into(), steps: vec![refine_step()] };
+    }
+    if wants_background_removal {
         return PlannedRequest {
             title: "Background isolation".into(),
             steps: vec![AiStep::command("Detect the subject and hide its background", "layer.removeBackground", json!({}))],
@@ -514,6 +563,11 @@ pub fn plan(prompt: &str) -> PlannedRequest {
             title: "Product photo preparation".into(),
             steps: vec![
                 AiStep::command("Detect the product and hide its background", "layer.removeBackground", json!({})),
+                AiStep::command(
+                    "Clean the product-mask edge",
+                    "layer.refineSubjectMask",
+                    json!({"radius": 3, "smartRadius": true, "smooth": 4, "feather": 0.5, "contrast": 10, "shiftEdge": -2}),
+                ),
                 AiStep::command("Lift tone and contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 12, "contrast": 6})),
                 AiStep::command("Add restrained vibrance", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 16, "saturation": 2})),
             ],
@@ -1054,6 +1108,14 @@ fn step_summary(step: &AiStep) -> String {
         "layer.createClippingMask" => "Clip active layer to the layer below".into(),
         "layer.releaseClippingMask" => "Release active layer from its clipping mask".into(),
         "layer.removeBackground" => "Detect subject locally → hide background with an editable mask".into(),
+        "layer.refineSubjectMask" => {
+            let radius = p.get("radius").and_then(Value::as_f64).unwrap_or(3.0);
+            let smooth = p.get("smooth").and_then(Value::as_f64).unwrap_or(4.0);
+            let feather = p.get("feather").and_then(Value::as_f64).unwrap_or(0.5);
+            let contrast = p.get("contrast").and_then(Value::as_f64).unwrap_or(10.0);
+            let shift = p.get("shiftEdge").and_then(Value::as_f64).unwrap_or(-2.0);
+            format!("Refine editable mask → Radius {radius} · Smooth {smooth} · Feather {feather}px · Contrast {contrast} · Shift {shift}%")
+        }
         "layer.newAdjustmentLayer.brightnessContrast" => {
             let b = p.get("brightness").and_then(Value::as_f64).unwrap_or(0.0);
             let c = p.get("contrast").and_then(Value::as_f64).unwrap_or(0.0);
@@ -1219,6 +1281,59 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 
     ui.add_space(7.0);
+    ui.label(RichText::new("MASK EDGE CLEANUP").size(9.5).color(t.text_faint).strong());
+    ui.label(
+        RichText::new("Tune the active editable subject mask with the local Select and Mask engine, then review it as an AI plan before applying.")
+            .size(9.5)
+            .color(t.text_faint),
+    );
+    let mask_ready =
+        app.session.active().and_then(|d| d.active_layer.and_then(|id| d.doc.layer(id))).is_some_and(|layer| layer.surface().is_some() && layer.mask.is_some());
+    ui.add_enabled_ui(mask_ready, |ui| {
+        egui::Grid::new("ai-mask-refine-controls").num_columns(2).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
+            ui.label(RichText::new("Radius").size(9.5).color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut app.ui.ai.mask_refine_radius).range(0.0..=250.0).speed(0.25));
+            ui.end_row();
+
+            ui.label(RichText::new("Smooth").size(9.5).color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut app.ui.ai.mask_refine_smooth).range(0.0..=100.0).speed(0.5));
+            ui.end_row();
+
+            ui.label(RichText::new("Feather").size(9.5).color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut app.ui.ai.mask_refine_feather).range(0.0..=1000.0).speed(0.25));
+            ui.end_row();
+
+            ui.label(RichText::new("Contrast").size(9.5).color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut app.ui.ai.mask_refine_contrast).range(0.0..=100.0).speed(0.5));
+            ui.end_row();
+
+            ui.label(RichText::new("Shift edge").size(9.5).color(t.text_dim));
+            ui.add(egui::DragValue::new(&mut app.ui.ai.mask_refine_shift_edge).range(-100.0..=100.0).speed(0.5));
+            ui.end_row();
+        });
+        ui.checkbox(&mut app.ui.ai.mask_refine_smart_radius, "Smart radius");
+        if crate::widgets::primary_button(ui, "Review mask cleanup", ui.available_width()).clicked() {
+            let params = json!({
+                "radius": app.ui.ai.mask_refine_radius,
+                "smartRadius": app.ui.ai.mask_refine_smart_radius,
+                "smooth": app.ui.ai.mask_refine_smooth,
+                "feather": app.ui.ai.mask_refine_feather,
+                "contrast": app.ui.ai.mask_refine_contrast,
+                "shiftEdge": app.ui.ai.mask_refine_shift_edge,
+            });
+            let planned = PlannedRequest {
+                title: "Mask edge cleanup".into(),
+                steps: vec![AiStep::command("Refine the active subject-mask edge", "layer.refineSubjectMask", params)],
+            };
+            apply_plan(app, "Refine the active subject mask".into(), planned, "mask refinement controls");
+            app.ui.ai.tab = 0;
+        }
+    });
+    if !mask_ready {
+        ui.label(RichText::new("Create or select a raster layer with an editable mask to enable these controls.").size(9.0).color(t.text_faint));
+    }
+
+    ui.add_space(7.0);
     ui.label(RichText::new("SAVED WORKFLOWS").size(9.5).color(t.text_faint).strong());
     ui.label(
         RichText::new("Batch runs a saved recipe on one folder and writes new *-ai.png copies; source files are never overwritten.")
@@ -1333,7 +1448,9 @@ mod tests {
             assert!(validate(&preset.steps).is_ok(), "{} must stay inside the reviewed AI boundary", preset.title);
             assert!(
                 preset.steps.iter().all(|step| {
-                    step.command.as_deref().is_some_and(|command| command == "layer.removeBackground" || command.starts_with("layer.newAdjustmentLayer."))
+                    step.command.as_deref().is_some_and(|command| {
+                        command == "layer.removeBackground" || command == "layer.refineSubjectMask" || command.starts_with("layer.newAdjustmentLayer.")
+                    })
                 }),
                 "{} should remain non-destructive and batch-safe",
                 preset.title
@@ -1381,7 +1498,27 @@ mod tests {
         let p = plan("Prepare this product photo for an online store");
         assert!(validate(&p.steps).is_ok());
         assert_eq!(p.steps.first().and_then(|s| s.command.as_deref()), Some("layer.removeBackground"));
+        assert_eq!(p.steps.get(1).and_then(|s| s.command.as_deref()), Some("layer.refineSubjectMask"));
         assert!(p.steps.iter().all(|s| s.command.is_some()));
+    }
+
+    #[test]
+    fn mask_refinement_intent_is_reviewed_and_parameter_bounded() {
+        for prompt in ["Clean mask edges", "Maske kenarlarini temizle"] {
+            let p = plan(prompt);
+            assert_eq!(p.steps.len(), 1, "{prompt}");
+            assert_eq!(p.steps[0].command.as_deref(), Some("layer.refineSubjectMask"), "{prompt}");
+            assert!(validate(&p.steps).is_ok(), "{prompt}");
+        }
+
+        assert!(validate(&[AiStep::command("Target arbitrary mask", "layer.refineSubjectMask", json!({"layer": 42, "radius": 3}),)]).is_err());
+        assert!(validate(&[AiStep::command("Overdrive mask cleanup", "layer.refineSubjectMask", json!({"radius": 251}),)]).is_err());
+
+        let combined = plan("Remove the background and clean mask edges");
+        assert_eq!(combined.steps.len(), 2);
+        assert_eq!(combined.steps[0].command.as_deref(), Some("layer.removeBackground"));
+        assert_eq!(combined.steps[1].command.as_deref(), Some("layer.refineSubjectMask"));
+        assert!(validate(&combined.steps).is_ok());
     }
 
     #[test]

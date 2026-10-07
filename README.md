@@ -75,7 +75,7 @@ Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 
 - [x] Image-aware subject detection through the local editor engine; document pixels stay on-device.
 - [x] Non-destructive background removal as an editable layer mask, available to plans, presets and saved/batch workflows.
-- [ ] AI-assisted mask refinement / edge cleanup controls.
+- [x] AI-assisted mask refinement / edge cleanup controls.
 - [ ] Product layout helpers: clean background, centering/scaling and editable soft shadow.
 
 ### Creative Studio MVP

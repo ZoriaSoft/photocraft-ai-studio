@@ -388,6 +388,32 @@ fn remove_background_creates_an_editable_non_destructive_mask() {
 }
 
 #[test]
+fn refine_subject_mask_changes_only_the_editable_mask_and_is_undoable() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |x, y| {
+        let inside = (((x - 20) * (x - 20) + (y - 15) * (y - 15)) as f32).sqrt() < 8.0;
+        if inside { [0.85, 0.18, 0.08, 1.0] } else { [0.96, 0.96, 0.96, 1.0] }
+    });
+    s.execute("layer.removeBackground", json!({})).unwrap();
+
+    let bounds = s.active().unwrap().doc.bounds();
+    let source_before = active(&s).surface().unwrap().read_region(bounds);
+    let mask_before = active(&s).mask.as_ref().unwrap().surface.read_region(bounds);
+
+    let r =
+        s.execute("layer.refineSubjectMask", json!({"radius": 5, "smartRadius": true, "smooth": 18, "feather": 2.0, "contrast": 22, "shiftEdge": -8})).unwrap();
+    assert_eq!(r["refined"], true);
+    assert_eq!(active(&s).surface().unwrap().read_region(bounds), source_before, "refinement must not touch source pixels");
+
+    let mask_after = active(&s).mask.as_ref().unwrap().surface.read_region(bounds);
+    assert_ne!(mask_after, mask_before, "strong cleanup settings should change the editable mask");
+
+    assert!(s.undo());
+    assert_eq!(active(&s).surface().unwrap().read_region(bounds), source_before);
+    assert_eq!(active(&s).mask.as_ref().unwrap().surface.read_region(bounds), mask_before, "one undo restores the pre-refinement mask");
+}
+
+#[test]
 fn layer_masks_in_gray_cmyk_lab() {
     for mode in ["gray", "cmyk", "lab"] {
         let mut s = session(16, mode);

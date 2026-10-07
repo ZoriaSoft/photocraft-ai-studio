@@ -67,4 +67,10 @@ The Workflows tab includes five deterministic product-photo presets: **Studio cu
 
 The general product-photo request now uses that real isolation command followed by restrained tonal adjustments. Direct requests such as “Remove the background” or “Arka planı kaldır” create a single reviewed background-isolation step rather than adding unrelated styling. Because the command is inside the same validator boundary, the result keeps plan review, atomic one-Undo execution, saved-workflow support and folder-batch compatibility. If segmentation cannot find a subject, the command fails without writing an output; an AI multi-step plan rolls back atomically.
 
+### Mask edge cleanup
+
+AI Studio can now refine an existing editable subject mask with the editor's local Select and Mask engine. The reviewed `layer.refineSubjectMask` command exposes bounded **radius**, **smart radius**, **smooth**, **feather**, **contrast**, and **shift edge** controls without changing the source raster pixels. The Workflows tab surfaces those controls only when the active raster layer already has an editable mask, and turns the chosen settings into a normal reviewable AI plan before execution.
+
+The command stays inside the same allowlist and parameter validator as other AI Studio actions. Model plans cannot target arbitrary layer IDs or send out-of-range refinement values. Refined masks remain editable, undoable, saveable as workflows and safe to use in folder batches. **Studio cutout** and the general product-photo plan now include a restrained cleanup pass immediately after local subject isolation.
+
 Image-aware V2 still does **not** claim generative fill, synthesized shadows, automatic subject repositioning, or semantic object replacement. Those remain separate future capabilities.
