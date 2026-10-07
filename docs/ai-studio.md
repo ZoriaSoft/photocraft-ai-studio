@@ -31,3 +31,10 @@ The command planner does **not** upload document pixels. It currently sends only
 Model output is treated as untrusted data. The response must parse into a structured plan, and every executable command must be present in AI Studio's reviewed allowlist. Unknown commands are rejected before entering the plan UI. Plans containing capabilities the editor cannot execute can use a pending step with no command; pending steps cannot run.
 
 If the model request fails and the local planner understands the request, AI Studio falls back to the local plan. Otherwise the provider error is surfaced without executing anything.
+
+
+## Saved workflows
+
+A validated plan can be saved as a reusable workflow from the Assistant tab. Desktop builds persist these recipes separately as `ai-workflows.json` in the application config directory. The file stores only the workflow name and validated editor steps; the original natural-language prompt is not persisted with the recipe.
+
+Saved workflows are treated as untrusted input when reloaded: every recipe is passed through the same command and parameter validator again, invalid entries are discarded, and future schema versions that this build does not understand are rejected.

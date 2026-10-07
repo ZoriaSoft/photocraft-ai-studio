@@ -24,6 +24,11 @@ pub struct AiPanelState {
     pub status: String,
     pub status_error: bool,
     pub recent_prompts: Vec<String>,
+    /// Persisted separately from generic workspace/UI state.
+    #[serde(skip)]
+    pub saved_workflows: Vec<AiWorkflow>,
+    #[serde(skip)]
+    pub workflow_name: String,
 }
 
 impl Default for AiPanelState {
@@ -36,6 +41,8 @@ impl Default for AiPanelState {
             status: "Ready for a request".into(),
             status_error: false,
             recent_prompts: Vec::new(),
+            saved_workflows: Vec::new(),
+            workflow_name: String::new(),
         }
     }
 }
@@ -65,6 +72,31 @@ pub struct PlannedRequest {
     pub title: String,
     pub steps: Vec<AiStep>,
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AiWorkflow {
+    pub name: String,
+    pub steps: Vec<AiStep>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+struct WorkflowStore {
+    version: u32,
+    workflows: Vec<AiWorkflow>,
+}
+
+impl Default for WorkflowStore {
+    fn default() -> Self {
+        Self { version: WORKFLOW_STORE_VERSION, workflows: Vec::new() }
+    }
+}
+
+const WORKFLOW_STORE_VERSION: u32 = 1;
+const MAX_SAVED_WORKFLOWS: usize = 50;
+const MAX_PLAN_STEPS: usize = 24;
+const MAX_STEP_LABEL_CHARS: usize = 160;
+const MAX_PENDING_NOTE_CHARS: usize = 500;
 
 /// Provider-neutral request passed to the native model service.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -238,13 +270,21 @@ fn validate_steps(steps: &[AiStep], require_executable: bool) -> Result<(), Stri
     if steps.is_empty() {
         return Err("The plan has no steps.".into());
     }
+    if steps.len() > MAX_PLAN_STEPS {
+        return Err(format!("The plan has too many steps (maximum {MAX_PLAN_STEPS})."));
+    }
     for step in steps {
+        let label_len = step.label.trim().chars().count();
+        if !(1..=MAX_STEP_LABEL_CHARS).contains(&label_len) {
+            return Err(format!("Every plan step needs a label between 1 and {MAX_STEP_LABEL_CHARS} characters."));
+        }
         let Some(command) = step.command.as_deref() else {
             if require_executable {
                 return Err(format!("{} needs an AI capability that is not connected yet.", step.label));
             }
-            if step.note.trim().is_empty() {
-                return Err(format!("{} is pending but has no explanation.", step.label));
+            let note_len = step.note.trim().chars().count();
+            if !(1..=MAX_PENDING_NOTE_CHARS).contains(&note_len) {
+                return Err(format!("{} needs a pending-note between 1 and {MAX_PENDING_NOTE_CHARS} characters.", step.label));
             }
             continue;
         };
@@ -395,6 +435,97 @@ pub fn plan(prompt: &str) -> PlannedRequest {
     PlannedRequest { title: "Edit plan".into(), steps }
 }
 
+fn workflow_name_ok(name: &str) -> bool {
+    let len = name.trim().chars().count();
+    (1..=64).contains(&len)
+}
+
+fn parse_saved_workflows(text: &str) -> Result<Vec<AiWorkflow>, String> {
+    let store: WorkflowStore = serde_json::from_str(text).map_err(|error| format!("Couldn't parse saved AI workflows: {error}"))?;
+    if store.version > WORKFLOW_STORE_VERSION {
+        return Err(format!("Saved AI workflows use unsupported schema version {}.", store.version));
+    }
+    let mut valid = Vec::new();
+    for workflow in store.workflows.into_iter().take(MAX_SAVED_WORKFLOWS) {
+        if workflow_name_ok(&workflow.name) && validate(&workflow.steps).is_ok() {
+            valid.push(workflow);
+        }
+    }
+    Ok(valid)
+}
+
+fn serialize_saved_workflows(workflows: &[AiWorkflow]) -> Result<String, String> {
+    let store = WorkflowStore { version: WORKFLOW_STORE_VERSION, workflows: workflows.iter().take(MAX_SAVED_WORKFLOWS).cloned().collect() };
+    serde_json::to_string_pretty(&store).map_err(|error| format!("Couldn't serialize AI workflows: {error}"))
+}
+
+pub fn load_saved_workflows(app: &mut PhotocraftApp) {
+    let Some(load) = app.services.load_ai_workflows.as_mut() else { return };
+    let Some(text) = load() else { return };
+    match parse_saved_workflows(&text) {
+        Ok(workflows) => app.ui.ai.saved_workflows = workflows,
+        Err(error) => {
+            app.ui.ai.status = error;
+            app.ui.ai.status_error = true;
+        }
+    }
+}
+
+fn persist_saved_workflows(app: &mut PhotocraftApp, workflows: &[AiWorkflow]) -> Result<(), String> {
+    let text = serialize_saved_workflows(workflows)?;
+    let Some(save) = app.services.save_ai_workflows.as_mut() else { return Ok(()) };
+    save(&text)
+}
+
+fn save_current_workflow(app: &mut PhotocraftApp) -> Result<(), String> {
+    validate(&app.ui.ai.plan)?;
+    let name = app.ui.ai.workflow_name.trim().to_string();
+    if !workflow_name_ok(&name) {
+        return Err("Workflow name must contain 1 to 64 characters.".into());
+    }
+    let workflow = AiWorkflow { name: name.clone(), steps: app.ui.ai.plan.clone() };
+    let mut next = app.ui.ai.saved_workflows.clone();
+    if let Some(existing) = next.iter_mut().find(|workflow| workflow.name.eq_ignore_ascii_case(&name)) {
+        *existing = workflow;
+    } else {
+        next.insert(0, workflow);
+        next.truncate(MAX_SAVED_WORKFLOWS);
+    }
+    persist_saved_workflows(app, &next)?;
+    app.ui.ai.saved_workflows = next;
+    app.ui.ai.status = format!("Saved workflow: {name}");
+    app.ui.ai.status_error = false;
+    Ok(())
+}
+
+fn remove_saved_workflow(app: &mut PhotocraftApp, index: usize) -> Result<(), String> {
+    if index >= app.ui.ai.saved_workflows.len() {
+        return Err("Saved workflow no longer exists.".into());
+    }
+    let mut next = app.ui.ai.saved_workflows.clone();
+    next.remove(index);
+    persist_saved_workflows(app, &next)?;
+    app.ui.ai.saved_workflows = next;
+    app.ui.ai.status = "Removed saved workflow.".into();
+    app.ui.ai.status_error = false;
+    Ok(())
+}
+
+fn load_workflow(app: &mut PhotocraftApp, index: usize) -> Result<(), String> {
+    let Some(workflow) = app.ui.ai.saved_workflows.get(index).cloned() else {
+        return Err("Saved workflow no longer exists.".into());
+    };
+    validate(&workflow.steps)?;
+    app.ui.ai.prompt.clear();
+    app.ui.ai.plan_title = workflow.name.clone();
+    app.ui.ai.plan = workflow.steps;
+    app.ui.ai.workflow_name = workflow.name.clone();
+    app.ui.ai.status = format!("Loaded workflow: {}", workflow.name);
+    app.ui.ai.status_error = false;
+    app.ui.ai.tab = 0;
+    Ok(())
+}
+
 fn remember_prompt(app: &mut PhotocraftApp, prompt: &str) {
     let ai = &mut app.ui.ai;
     ai.prompt = prompt.trim().to_string();
@@ -410,6 +541,7 @@ fn apply_plan(app: &mut PhotocraftApp, prompt: String, planned: PlannedRequest, 
     let ai = &mut app.ui.ai;
     ai.plan_title = planned.title;
     ai.plan = planned.steps;
+    ai.workflow_name = ai.plan_title.clone();
     ai.status_error = false;
     ai.status = match validate(&ai.plan) {
         Ok(()) => format!("{} step{} ready · {source}", ai.plan.len(), if ai.plan.len() == 1 { "" } else { "s" }),
@@ -673,6 +805,33 @@ fn plan_card(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
             }
         });
 
+    ui.add_space(5.0);
+    ui.label(RichText::new("SAVE AS WORKFLOW").size(9.0).color(t.text_faint).strong());
+    ui.horizontal(|ui| {
+        let save_width = 82.0;
+        let name_width = (ui.available_width() - save_width - 6.0).max(90.0);
+        egui::Frame::new()
+            .fill(t.field)
+            .stroke(Stroke::new(1.0, t.field_border))
+            .corner_radius(CornerRadius::same(t.radius_sm as u8))
+            .inner_margin(egui::Margin::symmetric(7, 3))
+            .show(ui, |ui| {
+                ui.set_width(name_width);
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.ui.ai.workflow_name).desired_width(f32::INFINITY).frame(egui::Frame::NONE).hint_text("Workflow name"),
+                );
+            });
+        let can_save = validate(&app.ui.ai.plan).is_ok() && workflow_name_ok(&app.ui.ai.workflow_name);
+        ui.add_enabled_ui(can_save, |ui| {
+            if crate::widgets::secondary_button(ui, "Save", save_width).clicked()
+                && let Err(error) = save_current_workflow(app)
+            {
+                app.ui.ai.status = error;
+                app.ui.ai.status_error = true;
+            }
+        });
+    });
+
     let valid = validate(&app.ui.ai.plan);
     let can_run = valid.is_ok() && app.session.active().is_some();
     ui.add_enabled_ui(can_run, |ui| {
@@ -722,16 +881,56 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
     }
 
-    ui.add_space(4.0);
-    egui::Frame::new()
-        .fill(t.field)
-        .stroke(Stroke::new(1.0, t.field_border))
-        .corner_radius(CornerRadius::same(t.radius as u8))
-        .inner_margin(egui::Margin::same(10))
-        .show(ui, |ui| {
-            ui.label(RichText::new("Saved workflows").font(theme::medium(11.5)).color(t.text));
-            ui.label(RichText::new("Saving custom multi-step recipes is the next milestone.").size(10.0).color(t.text_faint));
-        });
+    ui.add_space(7.0);
+    ui.label(RichText::new("SAVED WORKFLOWS").size(9.5).color(t.text_faint).strong());
+    if app.ui.ai.saved_workflows.is_empty() {
+        egui::Frame::new()
+            .fill(t.field)
+            .stroke(Stroke::new(1.0, t.field_border))
+            .corner_radius(CornerRadius::same(t.radius as u8))
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.label(RichText::new("No saved workflows yet").font(theme::medium(11.5)).color(t.text));
+                ui.label(RichText::new("Create a safe plan in Assistant, give it a name, then save it here for reuse.").size(10.0).color(t.text_faint));
+            });
+    } else {
+        let workflows = app.ui.ai.saved_workflows.clone();
+        let mut action = None;
+        for (index, workflow) in workflows.iter().enumerate() {
+            egui::Frame::new()
+                .fill(t.card)
+                .stroke(Stroke::new(1.0, t.card_border))
+                .corner_radius(CornerRadius::same(t.radius as u8))
+                .inner_margin(egui::Margin::symmetric(9, 7))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(&workflow.name).font(theme::medium(11.5)).color(t.text));
+                            ui.label(
+                                RichText::new(format!("{} step{}", workflow.steps.len(), if workflow.steps.len() == 1 { "" } else { "s" }))
+                                    .size(9.5)
+                                    .color(t.text_faint),
+                            );
+                        });
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if crate::icons::button(ui, "trash", 24.0, false, "Remove saved workflow").clicked() {
+                                action = Some((index, false));
+                            }
+                            if crate::widgets::secondary_button(ui, "Use", 56.0).clicked() {
+                                action = Some((index, true));
+                            }
+                        });
+                    });
+                });
+        }
+        if let Some((index, load)) = action {
+            let result = if load { load_workflow(app, index) } else { remove_saved_workflow(app, index) };
+            if let Err(error) = result {
+                app.ui.ai.status = error;
+                app.ui.ai.status_error = true;
+            }
+        }
+    }
 }
 
 fn workflow_card(ui: &mut egui::Ui, t: &Tokens, icon: &str, title: &str, subtitle: &str) -> bool {
@@ -844,6 +1043,105 @@ mod tests {
         assert_eq!(hidden.steps.first().and_then(|step| step.command.as_deref()), Some("layer.setProps"));
         assert_eq!(hidden.steps.first().and_then(|step| step.params.get("visible")).and_then(Value::as_bool), Some(false));
         assert!(validate(&hidden.steps).is_ok());
+    }
+
+    #[test]
+    fn saved_workflow_round_trip_filters_unsafe_entries() {
+        let safe = AiWorkflow {
+            name: "Polish".into(),
+            steps: vec![AiStep::command("Lift contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 8, "contrast": 5}))],
+        };
+        let unsafe_workflow = AiWorkflow { name: "Unsafe".into(), steps: vec![AiStep::command("Save", "file.save", json!({}))] };
+        let text = serialize_saved_workflows(&[safe.clone(), unsafe_workflow]).unwrap();
+        assert_eq!(parse_saved_workflows(&text).unwrap(), vec![safe]);
+    }
+
+    #[test]
+    fn workflow_store_is_versioned_and_does_not_persist_original_prompt() {
+        let workflow = AiWorkflow { name: "Polish".into(), steps: vec![AiStep::command("Duplicate", "layer.duplicate", json!({}))] };
+        let text = serialize_saved_workflows(&[workflow]).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["version"], WORKFLOW_STORE_VERSION);
+        assert!(value.get("workflows").is_some());
+        assert!(!text.contains("prompt"));
+    }
+
+    #[test]
+    fn ui_state_does_not_serialize_saved_workflow_archive() {
+        let mut state = AiPanelState::default();
+        state.saved_workflows.push(AiWorkflow { name: "Private recipe".into(), steps: vec![AiStep::command("Duplicate", "layer.duplicate", json!({}))] });
+        let value = serde_json::to_value(state).unwrap();
+        assert!(value.get("saved_workflows").is_none());
+        assert!(value.get("workflow_name").is_none());
+    }
+
+    #[test]
+    fn saving_workflow_replaces_same_name_and_persists() {
+        use std::sync::{Arc, Mutex};
+        let written = Arc::new(Mutex::new(String::new()));
+        let out = Arc::clone(&written);
+        let services = crate::Services {
+            save_ai_workflows: Some(Box::new(move |text| {
+                *out.lock().unwrap() = text.to_string();
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.ui.ai.workflow_name = "Polish".into();
+        app.ui.ai.prompt = "brighten".into();
+        app.ui.ai.plan_title = "Edit plan".into();
+        app.ui.ai.plan = vec![AiStep::command("Lift", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 5}))];
+        save_current_workflow(&mut app).unwrap();
+        app.ui.ai.plan = vec![AiStep::command("Vibrance", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 10}))];
+        save_current_workflow(&mut app).unwrap();
+        assert_eq!(app.ui.ai.saved_workflows.len(), 1);
+        assert_eq!(app.ui.ai.saved_workflows[0].steps[0].command.as_deref(), Some("layer.newAdjustmentLayer.vibrance"));
+        assert!(written.lock().unwrap().contains("Polish"));
+    }
+
+    #[test]
+    fn saved_workflow_survives_a_new_app_instance() {
+        use std::sync::{Arc, Mutex};
+        let store = Arc::new(Mutex::new(String::new()));
+        let writer = Arc::clone(&store);
+        let services = crate::Services {
+            save_ai_workflows: Some(Box::new(move |text| {
+                *writer.lock().unwrap() = text.to_string();
+                Ok(())
+            })),
+            ..Default::default()
+        };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.ui.ai.workflow_name = "Reusable polish".into();
+        app.ui.ai.plan = vec![AiStep::command("Duplicate", "layer.duplicate", json!({}))];
+        save_current_workflow(&mut app).unwrap();
+
+        let reader = Arc::clone(&store);
+        let services = crate::Services { load_ai_workflows: Some(Box::new(move || Some(reader.lock().unwrap().clone()))), ..Default::default() };
+        let restarted = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        assert_eq!(restarted.ui.ai.saved_workflows.len(), 1);
+        assert_eq!(restarted.ui.ai.saved_workflows[0].name, "Reusable polish");
+        assert_eq!(restarted.ui.ai.saved_workflows[0].steps[0].command.as_deref(), Some("layer.duplicate"));
+    }
+
+    #[test]
+    fn plans_and_saved_workflows_are_bounded() {
+        let steps: Vec<_> = (0..=MAX_PLAN_STEPS).map(|index| AiStep::command(&format!("Step {index}"), "layer.duplicate", json!({}))).collect();
+        assert!(validate(&steps).is_err());
+
+        let too_long = "x".repeat(MAX_STEP_LABEL_CHARS + 1);
+        assert!(validate(&[AiStep::command(&too_long, "layer.duplicate", json!({}))]).is_err());
+    }
+
+    #[test]
+    fn failed_workflow_save_does_not_mutate_archive() {
+        let services = crate::Services { save_ai_workflows: Some(Box::new(|_| Err("disk full".into()))), ..Default::default() };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.ui.ai.workflow_name = "Polish".into();
+        app.ui.ai.plan = vec![AiStep::command("Duplicate", "layer.duplicate", json!({}))];
+        assert!(save_current_workflow(&mut app).is_err());
+        assert!(app.ui.ai.saved_workflows.is_empty());
     }
 
     #[test]

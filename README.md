@@ -47,18 +47,18 @@ export requested sizes
 - [x] Keep upstream licenses and attribution.
 - [x] Remove upstream ArtCraft brand assets from the modified distribution.
 - [ ] Establish the final product name and visual identity.
-- [ ] Add a dedicated AI / command panel shell.
+- [x] Add a dedicated AI / command panel shell.
 
 ### AI workflow MVP
 
 - [x] Natural-language command planner foundation (local + optional model provider).
-- [ ] Expand the model command vocabulary and document context.
+- [x] Expand the reviewed AI command vocabulary for common layer and tonal edits.
 
 Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
-- [ ] Safe command allowlist and validation layer.
+- [x] Safe command allowlist with command-specific parameter validation.
 - [ ] Command preview before destructive or expensive operations.
 - [ ] Undoable multi-step AI actions.
-- [ ] Save a sequence as a reusable workflow.
+- [x] Save a validated command sequence as a reusable workflow.
 
 ### Creative Studio MVP
 

@@ -220,6 +220,9 @@ pub struct Services {
     pub recover: Option<RecoverFn>,
     /// History Log text file output.
     pub append_text: Option<AppendTextFn>,
+    /// Saved AI workflow persistence. Kept separate from preferences so workflow schema can evolve independently.
+    pub load_ai_workflows: Option<LoadTextFn>,
+    pub save_ai_workflows: Option<SaveTextFn>,
     /// OS requests (macOS open-documents / quit Apple events), polled every frame.
     pub os_events: Option<OsEventsFn>,
     /// Optional model-backed AI planner. When absent, AI Studio uses its deterministic local planner.
@@ -449,6 +452,7 @@ impl PhotocraftApp {
         };
         // Saved preferences (and recovered documents) are in place before the first frame.
         prefs_ui::load(&mut app);
+        ai_panel::load_saved_workflows(&mut app);
         // File › Scripts › Script Events Manager: "Start Application".
         photocraft_engine::automate_cmds::fire_event(&mut app.session, "startApplication");
         app
