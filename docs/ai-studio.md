@@ -58,3 +58,11 @@ Before execution, AI Studio presents each step in editor language rather than ex
 ## Atomic plan execution
 
 Executable AI plans run as one history transaction. The shell injects an internal coalescing key only after the plan has passed validation, so model output and saved workflows cannot control history grouping. A successful multi-step plan appears as one `AI Plan: ?` undo state. If any later step fails, AI Studio automatically undoes the already-applied steps, removes the failed plan from redo history, and restores the command journal to its pre-plan state.
+
+## Product Photo Presets V1
+
+The Workflows tab includes four deterministic product-photo presets: **Clean catalog**, **Marketplace crisp**, **Soft luxury**, and **Monochrome detail**. These presets are not prompt templates; each expands directly into a reviewed editor plan so the user can inspect the exact adjustment layers before applying it.
+
+All V1 product presets are intentionally non-destructive and batch-safe. They use only brightness/contrast, curves, vibrance, and black-and-white adjustment layers already covered by the AI safety boundary. A preset therefore gets the same validation, plan review, atomic one-Undo execution, saved-workflow support, and folder-batch compatibility as any other executable AI plan.
+
+V1 does **not** claim to remove a background, isolate a product, synthesize shadows, or reposition a subject. Those operations require image-aware selection or generation capabilities that are not yet part of the reviewed command surface. The general product-photo natural-language request continues to show subject isolation as pending rather than pretending it happened.

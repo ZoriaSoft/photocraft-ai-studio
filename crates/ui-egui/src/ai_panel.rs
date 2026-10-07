@@ -79,6 +79,73 @@ pub struct AiWorkflow {
     pub steps: Vec<AiStep>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ProductPhotoPreset {
+    id: &'static str,
+    icon: &'static str,
+    title: &'static str,
+    subtitle: &'static str,
+    steps: Vec<AiStep>,
+}
+
+/// Built-in product-photo recipes intentionally use only reviewed, non-destructive adjustment
+/// commands. They do not pretend to remove backgrounds or isolate subjects: those operations need
+/// image-aware capabilities that are outside the current safe command surface.
+fn product_photo_presets() -> Vec<ProductPhotoPreset> {
+    vec![
+        ProductPhotoPreset {
+            id: "clean-catalog",
+            icon: "sparkles",
+            title: "Clean catalog",
+            subtitle: "Bright, neutral and restrained",
+            steps: vec![
+                AiStep::command("Open up the product tones", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 10, "contrast": 4})),
+                AiStep::command("Keep color natural", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 8, "saturation": 0})),
+            ],
+        },
+        ProductPhotoPreset {
+            id: "marketplace-crisp",
+            icon: "contrast",
+            title: "Marketplace crisp",
+            subtitle: "Punchier detail for small thumbnails",
+            steps: vec![
+                AiStep::command("Add crisp tonal separation", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 6, "contrast": 12})),
+                AiStep::command(
+                    "Shape the midtone curve",
+                    "layer.newAdjustmentLayer.curves",
+                    json!({"points": [[0, 0], [64, 58], [128, 132], [192, 202], [255, 255]]}),
+                ),
+                AiStep::command("Add controlled color pop", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 12, "saturation": 2})),
+            ],
+        },
+        ProductPhotoPreset {
+            id: "soft-luxury",
+            icon: "sparkles",
+            title: "Soft luxury",
+            subtitle: "Gentle contrast and softer color",
+            steps: vec![
+                AiStep::command("Soften the base contrast", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 5, "contrast": -4})),
+                AiStep::command(
+                    "Lift shadows and soften highlights",
+                    "layer.newAdjustmentLayer.curves",
+                    json!({"points": [[0, 8], [64, 70], [128, 134], [192, 195], [255, 248]]}),
+                ),
+                AiStep::command("Restrain saturation", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 5, "saturation": -4})),
+            ],
+        },
+        ProductPhotoPreset {
+            id: "mono-detail",
+            icon: "contrast",
+            title: "Monochrome detail",
+            subtitle: "Black & white with controlled contrast",
+            steps: vec![
+                AiStep::command("Convert with an editable B&W layer", "layer.newAdjustmentLayer.blackWhite", json!({})),
+                AiStep::command("Strengthen product detail", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 3, "contrast": 10})),
+            ],
+        },
+    ]
+}
+
 /// One desktop folder-batch request. The native runner revalidates `workflow` before touching any
 /// output and never writes to `input_dir`.
 #[derive(Clone, Debug, PartialEq)]
@@ -1104,17 +1171,15 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     ui.spacing_mut().item_spacing.y = 8.0;
     ui.add_space(2.0);
-    ui.label(RichText::new("WORKFLOW STARTERS").size(9.5).color(t.text_faint).strong());
-    ui.label(RichText::new("Reusable recipes built from safe editor commands.").size(10.5).color(t.text_dim));
+    ui.label(RichText::new("PRODUCT PHOTO PRESETS").size(9.5).color(t.text_faint).strong());
+    ui.label(RichText::new("Built-in, non-destructive looks made only from reviewed adjustment commands.").size(10.5).color(t.text_dim));
+    ui.label(RichText::new("Background removal and subject isolation stay explicit until image-aware tools are connected.").size(9.5).color(t.text_faint));
 
-    for (icon, title, subtitle, prompt) in [
-        ("sparkles", "Product polish", "Tone + restrained vibrance", "Make it brighter with a little more contrast and vibrance"),
-        ("contrast", "Tonal lift", "Brightness + contrast, non-destructive", "Make this brighter and add contrast"),
-        ("layers", "Layer starter", "Duplicate the active layer", "Duplicate the active layer"),
-    ] {
-        if workflow_card(ui, &t, icon, title, subtitle) {
-            let prompt = prompt.to_string();
-            apply_plan(app, prompt.clone(), plan(&prompt), "workflow");
+    for preset in product_photo_presets() {
+        if workflow_card(ui, &t, preset.icon, preset.title, preset.subtitle) {
+            let prompt = format!("Use the {} product-photo preset", preset.title);
+            let planned = PlannedRequest { title: preset.title.into(), steps: preset.steps };
+            apply_plan(app, prompt, planned, "built-in product preset");
             app.ui.ai.tab = 0;
         }
     }
@@ -1222,6 +1287,44 @@ mod tests {
         assert!(p.steps.len() >= 2);
         assert!(validate(&p.steps).is_ok());
         assert!(p.steps.iter().all(|s| s.command.as_deref().is_some_and(|c| c.starts_with("layer."))));
+    }
+
+    #[test]
+    fn product_photo_presets_are_safe_non_destructive_plans() {
+        let presets = product_photo_presets();
+        assert_eq!(presets.len(), 4);
+        let mut ids = std::collections::BTreeSet::new();
+        for preset in presets {
+            assert!(ids.insert(preset.id), "duplicate preset id: {}", preset.id);
+            assert!(validate(&preset.steps).is_ok(), "{} must stay inside the reviewed AI boundary", preset.title);
+            assert!(
+                preset.steps.iter().all(|step| step.command.as_deref().is_some_and(|command| command.starts_with("layer.newAdjustmentLayer."))),
+                "{} should remain non-destructive and batch-safe",
+                preset.title
+            );
+        }
+    }
+
+    #[test]
+    fn product_photo_presets_execute_against_the_editor_engine() {
+        for preset in product_photo_presets() {
+            let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+            app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+            app.ui.ai.plan_title = preset.title.into();
+            app.ui.ai.plan = preset.steps;
+            run_plan(&mut app);
+            assert!(!app.ui.ai.status_error, "{} failed: {}", preset.title, app.ui.ai.status);
+            assert!(app.session.undo(), "{} should remain one undoable editor transaction", preset.title);
+        }
+    }
+
+    #[test]
+    fn product_photo_presets_do_not_claim_unavailable_background_work() {
+        for preset in product_photo_presets() {
+            let text = format!("{} {}", preset.title, preset.subtitle).to_ascii_lowercase();
+            assert!(!text.contains("remove background"));
+            assert!(!text.contains("isolate"));
+        }
     }
 
     #[test]
