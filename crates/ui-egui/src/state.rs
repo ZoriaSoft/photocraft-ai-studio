@@ -220,6 +220,9 @@ impl Tool {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Panels {
+    /// AI-first command and workflow panel for this fork.
+    #[serde(default = "ai_panel_default")]
+    pub ai: bool,
     pub layers: bool,
     pub history: bool,
     pub properties: bool,
@@ -236,9 +239,14 @@ pub struct Panels {
     pub character: bool,
 }
 
+fn ai_panel_default() -> bool {
+    false
+}
+
 impl Default for Panels {
     fn default() -> Self {
         Self {
+            ai: false,
             layers: true,
             history: false,
             properties: true,
@@ -549,6 +557,9 @@ pub struct DockTabs {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiState {
     pub tool: Tool,
+    /// AI command planner and workflow UI.
+    #[serde(default)]
+    pub ai: crate::ai_panel::AiPanelState,
     /// Recently opened file paths, most-recent first (File › Open Recent). Capped; de-duplicated.
     #[serde(default)]
     pub recent_files: Vec<String>,
@@ -669,6 +680,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             tool: Tool::Brush,
+            ai: Default::default(),
             recent_files: Vec::new(),
             text_edit: None,
             transform: None,
