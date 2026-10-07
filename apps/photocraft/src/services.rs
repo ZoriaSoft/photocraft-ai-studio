@@ -54,6 +54,10 @@ pub fn prefs_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("preferences.json"))
 }
 
+fn ai_workflows_file() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("ai-workflows.json"))
+}
+
 /// The brush preset store (one file per preset group plus tip bitmaps; see
 /// `photocraft_engine::preset_store`).
 pub fn presets_dir() -> Option<PathBuf> {
@@ -258,6 +262,8 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| e.to_string())?;
             f.write_all(text.as_bytes()).map_err(|e| e.to_string())
         })),
+        load_ai_workflows: Some(Box::new(|| std::fs::read_to_string(ai_workflows_file()?).ok())),
+        save_ai_workflows: Some(Box::new(|text: &str| write_atomic(&ai_workflows_file().ok_or("no config directory")?, text.as_bytes()))),
         // Set by main once the Apple-event handlers are connected (macOS).
         os_events: None,
         ai_plan: ai_planner(),
