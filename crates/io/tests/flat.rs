@@ -43,6 +43,8 @@ codec_rt!(png_rgb8_opaque, "png", ColorMode::Rgb, SampleType::U8, false, 0.0);
 codec_rt!(png_rgba16, "png", ColorMode::Rgb, SampleType::U16, true, 0.0);
 codec_rt!(png_gray8, "png", ColorMode::Grayscale, SampleType::U8, false, 0.0);
 codec_rt!(png_graya16, "png", ColorMode::Grayscale, SampleType::U16, true, 0.0);
+codec_rt!(webp_rgba8, "webp", ColorMode::Rgb, SampleType::U8, true, 0.0);
+codec_rt!(webp_rgb8_opaque, "webp", ColorMode::Rgb, SampleType::U8, false, 0.0);
 codec_rt!(tga_rgba8, "tga", ColorMode::Rgb, SampleType::U8, true, 0.0);
 codec_rt!(tga_rgb8_opaque, "tga", ColorMode::Rgb, SampleType::U8, false, 0.0);
 codec_rt!(tga_gray8, "tga", ColorMode::Grayscale, SampleType::U8, false, 0.0);
@@ -51,6 +53,17 @@ codec_rt!(tiff_rgb16, "tif", ColorMode::Rgb, SampleType::U16, false, 0.0);
 codec_rt!(tiff_cmyk8, "tiff", ColorMode::Cmyk, SampleType::U8, false, 0.0);
 codec_rt!(tiff_cmyka16, "tiff", ColorMode::Cmyk, SampleType::U16, true, 0.0);
 codec_rt!(tiff_gray8, "tiff", ColorMode::Grayscale, SampleType::U8, false, 0.0);
+
+#[test]
+fn creative_studio_mvp_formats_export_and_reopen() {
+    let d = single(ColorMode::Rgb, SampleType::U8, false);
+    for ext in ["png", "jpg", "webp", "psd"] {
+        let exported = export(&d, ext, &ExportOptions::default()).unwrap_or_else(|e| panic!("export {ext}: {e}"));
+        let reopened = import(&format!("catalog.{ext}"), &exported.bytes).unwrap_or_else(|e| panic!("open {ext}: {e}"));
+        assert_eq!(reopened.document.size, d.size, "{ext}");
+        assert!(!reopened.document.layers.is_empty(), "{ext}");
+    }
+}
 
 /// EXR stores linear light: a linear document round-trips exactly; an sRGB (untagged) one is
 /// linearised on export and comes back tagged linear sRGB with the same colours.

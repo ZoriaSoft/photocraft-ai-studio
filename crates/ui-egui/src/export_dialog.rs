@@ -11,7 +11,7 @@ use crate::state::DialogKind;
 use crate::theme::Tokens;
 use crate::{ExportSettings, PhotocraftApp};
 
-const FORMATS: [(&str, &str); 5] = [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP (lossless)"), ("tif", "TIFF"), ("tga", "TGA")];
+const FORMATS: [(&str, &str); 6] = [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP (lossless)"), ("psd", "PSD (layered)"), ("tif", "TIFF"), ("tga", "TGA")];
 
 pub fn open(app: &mut PhotocraftApp) -> Result<u64, String> {
     let st = app.session.active().ok_or("no document")?;
@@ -84,7 +84,9 @@ fn export_document(doc: &Document, f: &Map<String, Value>, max_side: Option<u32>
         s.execute("image.imageSize", json!({"width": w, "resample": if max_side.is_some() { "bilinear" } else { "bicubic" }})).map_err(|e| e.to_string())?;
     }
     let fmt = s_fmt(f);
-    if !f.get("transparency").and_then(Value::as_bool).unwrap_or(true) || fmt == "jpg" {
+    // PSD export is the layered-copy path: keep layers/transparency even if the user previously
+    // toggled transparency off while another flat format was selected in the same dialog.
+    if fmt != "psd" && (!f.get("transparency").and_then(Value::as_bool).unwrap_or(true) || fmt == "jpg") {
         s.execute("layer.flattenImage", json!({})).map_err(|e| e.to_string())?;
     }
     s.active().map(|d| (*d.doc).clone()).ok_or_else(|| "export failed".into())
@@ -131,6 +133,8 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                 let mut q = n(f, "quality", 85.0) as f32;
                 crate::widgets::slider_row(ui, tl!("Quality"), &mut q, 1.0..=100.0, "%", None);
                 f.insert("quality".into(), json!(q.round()));
+            } else if fmt == "psd" {
+                ui.label(egui::RichText::new("Layers and transparency are preserved.").color(t.text_dim).size(10.5));
             } else {
                 let mut tr = f.get("transparency").and_then(Value::as_bool).unwrap_or(true);
                 crate::widgets::checkbox(ui, &mut tr, tl!("Transparency"));
@@ -231,6 +235,32 @@ pub fn quick_export_png(app: &mut PhotocraftApp) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creative_studio_mvp_formats_are_exposed_in_export_as() {
+        let keys: Vec<_> = FORMATS.iter().map(|(key, _)| *key).collect();
+        for key in ["png", "jpg", "webp", "psd"] {
+            assert!(keys.contains(&key), "Export As is missing {key}");
+        }
+    }
+
+    #[test]
+    fn psd_export_path_keeps_layers_even_after_transparency_was_disabled() {
+        let mut doc = Document::with_background(
+            "x",
+            photocraft_doc::Size::new(32, 24),
+            photocraft_doc::ColorMode::Rgb,
+            photocraft_doc::SampleType::U8,
+            photocraft_doc::Color::WHITE,
+        );
+        doc.layers.push(photocraft_doc::Layer::raster("Product", doc.pixel_format()));
+        let mut f = Map::new();
+        f.insert("format".into(), json!("psd"));
+        f.insert("transparency".into(), json!(false));
+        f.insert("scale".into(), json!(100));
+        let out = export_document(&doc, &f, None).unwrap();
+        assert_eq!(out.layers.len(), 2);
+    }
 
     #[test]
     fn export_document_scales_and_flattens() {

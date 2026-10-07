@@ -73,11 +73,13 @@ Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 
 ### Creative Studio MVP
 
-- [ ] Open PNG, JPEG, WebP and PSD documents.
+- [x] Open PNG, JPEG, WebP and PSD documents.
 - [ ] Core layer / mask / text operations.
 - [x] Product-photo workflow presets (safe built-in adjustment recipes).
 - [x] Batch workflow execution from saved workflows (desktop V1: source folder → safe PNG copies).
-- [ ] Export PNG, JPEG, WebP and PSD where supported by the engine.
+- [x] Export PNG, JPEG, WebP and PSD (WebP is lossless; PSD keeps layers).
+
+Format baseline and limitations: [`docs/creative-studio-formats.md`](docs/creative-studio-formats.md)
 
 ## Architecture strategy
 

@@ -33,7 +33,8 @@ const SAVE_FILTERS: &[(&str, &[&str])] = &[
     ("Photoshop", &["psd", "psb"]),
     ("PhotoCraft", &["pcraft"]),
     ("PNG", &["png"]),
-    ("JPEG", &["jpg"]),
+    ("JPEG", &["jpg", "jpeg"]),
+    ("WebP (lossless)", &["webp"]),
     ("TIFF", &["tif"]),
     ("Targa", &["tga"]),
     ("OpenEXR", &["exr"]),
@@ -645,6 +646,16 @@ mod tests {
         let mut b = vec![0u8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 32, 8];
         b.extend_from_slice(&[0, 0, 255, 255]); // BGRA red
         b
+    }
+
+    #[test]
+    fn creative_studio_file_dialogs_cover_mvp_formats() {
+        for ext in ["png", "jpg", "jpeg", "webp", "psd"] {
+            assert!(OPEN_EXTS.contains(&ext), "open dialog is missing {ext}");
+            assert!(SAVE_FILTERS.iter().any(|(_, exts)| exts.contains(&ext)), "save dialog is missing {ext}");
+        }
+        assert_eq!(save_filters("catalog.webp")[0].0, "WebP (lossless)");
+        assert_eq!(save_filters("catalog.psd")[0].0, "Photoshop");
     }
 
     #[test]
