@@ -903,7 +903,11 @@ pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let p = app.ui.panels.clone();
     if t.pro {
-        dock_panels(app, ui, &p, &t);
+        if p.ai {
+            ai_drawer(app, ui, &t);
+        } else {
+            dock_panels(app, ui, &p, &t);
+        }
     }
     // Narrow icon rail (always visible): shows, expands or collapses panel groups.
     let (rw, rb) = if t.pro { (36.0, 28.0) } else { (44.0, 32.0) };
@@ -914,6 +918,10 @@ pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             ui.painter().line_segment([r.left_top() - vec2(6.0, 8.0), r.left_bottom() + vec2(-6.0, 8.0)], Stroke::new(1.0, t.separator));
             ui.spacing_mut().item_spacing.y = 4.0;
             use crate::dock::Group;
+            let ai_on = p.ai;
+            if icons::rail_button(ui, "sparkles", rb, ai_on, tl!("AI Studio")).clicked() {
+                app.ui.panels.ai = !app.ui.panels.ai;
+            }
             let entries: [(&str, &str, Group); 5] = [
                 ("sliders-horizontal", tl!("Properties"), Group::Properties),
                 ("navigation", tl!("Navigator"), Group::Navigator),
@@ -926,17 +934,62 @@ pub fn right_dock(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 let docked = t.pro || g != Group::Properties;
                 let on = g.shown(&p) && !(docked && app.ui.dock.is_collapsed(g));
                 if icons::rail_button(ui, icon, rb, on, name).clicked() {
+                    app.ui.panels.ai = false;
                     crate::dock::rail_click(app, g, docked);
                 }
             }
         },
     );
     if !t.pro {
-        dock_panels(app, ui, &p, &t);
+        if p.ai {
+            ai_drawer(app, ui, &t);
+        } else {
+            dock_panels(app, ui, &p, &t);
+        }
     }
     crate::dock::persist(app, ui.ctx());
 }
 
+fn ai_drawer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let mut close = false;
+    egui::Panel::right("ai-studio-drawer")
+        .resizable(true)
+        .default_size(if t.pro { 370.0 } else { 350.0 })
+        .size_range(310.0..=480.0)
+        .frame(egui::Frame::NONE.fill(t.dock).inner_margin(egui::Margin::symmetric(12, 10)))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("AI Studio").font(crate::theme::semibold(13.5)).color(t.text));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if icons::button(ui, "x", 24.0, false, "Close AI Studio").clicked() {
+                        close = true;
+                    }
+                    ui.label(egui::RichText::new("LOCAL").size(9.0).color(t.accent_text));
+                });
+            });
+            ui.add_space(7.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for (tab, label) in [(0usize, "Assistant"), (1usize, "Workflows")] {
+                    let selected = app.ui.ai.tab == tab;
+                    let button = egui::Button::new(egui::RichText::new(label).size(11.0).color(if selected { t.accent_text } else { t.text_dim }))
+                        .fill(if selected { t.accent_soft } else { t.card })
+                        .stroke(egui::Stroke::new(1.0, if selected { t.accent_border } else { t.card_border }))
+                        .corner_radius(egui::CornerRadius::same(t.radius_sm as u8));
+                    if ui.add_sized([96.0, 28.0], button).clicked() {
+                        app.ui.ai.tab = tab;
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(4.0);
+            crate::ai_panel::panel(app, ui, app.ui.ai.tab == 1);
+        });
+    if close {
+        app.ui.panels.ai = false;
+    }
+}
 /// The right dock's width range (points).
 const DOCK_WIDTH: std::ops::RangeInclusive<f32> = 250.0..=520.0;
 

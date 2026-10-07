@@ -19,6 +19,7 @@ pub mod adjust_dialog;
 pub mod adjust_editors;
 pub mod adjust_preview;
 pub mod adjust_ui;
+pub mod ai_panel;
 pub mod analysis_ui;
 pub mod artboard_ui;
 pub mod brush_panel;

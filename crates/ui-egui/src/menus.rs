@@ -37,6 +37,7 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("view.fitOnScreen", "Fit on Screen", &["View"], Some("Cmd+0")),
     ("view.actualPixels", "100%", &["View"], Some("Cmd+1")),
     ("window.newWindowForDocument", "New Window for Document", &["Window", "Arrange"], None),
+    ("window.toggle.ai", "AI Studio", &["Window"], None),
     ("window.toggle.layers", "Layers", &["Window"], Some("F7")),
     ("window.toggle.history", "History", &["Window"], None),
     ("window.toggle.properties", "Properties", &["Window"], None),
@@ -402,6 +403,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
             }
             let p = &mut app.ui.panels;
             let slot = match &t["window.toggle.".len()..] {
+                "ai" => &mut p.ai,
                 "layers" => &mut p.layers,
                 "history" => &mut p.history,
                 "properties" => &mut p.properties,
@@ -549,6 +551,7 @@ fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
     }
     let p = &app.ui.panels;
     Some(match id {
+        "window.toggle.ai" => p.ai,
         "window.toggle.layers" => p.layers,
         "window.toggle.history" => p.history,
         "window.toggle.properties" => p.properties,
@@ -898,6 +901,7 @@ pub fn apply_workspace(app: &mut PhotocraftApp) {
         "Graphic and Web" => (false, true, true, false, true),
         _ => (false, true, true, false, true),
     };
+    p.ai = false;
     p.navigator = nav;
     p.color = color;
     p.layers = layers;
