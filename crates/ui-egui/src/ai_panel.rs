@@ -81,13 +81,157 @@ pub struct AiPlannerRequest {
 const SAFE_COMMANDS: &[&str] = &[
     "layer.new.layer",
     "layer.new.group",
+    "layer.groupLayers",
     "layer.duplicate",
+    "layer.setProps",
+    "layer.arrange.bringForward",
+    "layer.arrange.sendBackward",
+    "layer.arrange.bringToFront",
+    "layer.arrange.sendToBack",
+    "layer.createClippingMask",
+    "layer.releaseClippingMask",
     "layer.newAdjustmentLayer.brightnessContrast",
     "layer.newAdjustmentLayer.curves",
     "layer.newAdjustmentLayer.vibrance",
     "layer.newAdjustmentLayer.blackWhite",
     "layer.newAdjustmentLayer.invert",
 ];
+
+fn param_object<'a>(command: &str, params: &'a Value) -> Result<Option<&'a serde_json::Map<String, Value>>, String> {
+    match params {
+        Value::Null => Ok(None),
+        Value::Object(map) => Ok(Some(map)),
+        _ => Err(format!("Parameters for `{command}` must be a JSON object.")),
+    }
+}
+
+fn only_keys(command: &str, map: Option<&serde_json::Map<String, Value>>, allowed: &[&str]) -> Result<(), String> {
+    let Some(map) = map else { return Ok(()) };
+    for key in map.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("Parameter `{key}` is not allowed for AI command `{command}`."));
+        }
+    }
+    Ok(())
+}
+
+fn no_params(command: &str, map: Option<&serde_json::Map<String, Value>>) -> Result<(), String> {
+    if map.is_some_and(|map| !map.is_empty()) {
+        return Err(format!("AI command `{command}` does not accept parameters."));
+    }
+    Ok(())
+}
+
+fn optional_name(command: &str, map: Option<&serde_json::Map<String, Value>>) -> Result<(), String> {
+    let Some(value) = map.and_then(|map| map.get("name")) else { return Ok(()) };
+    let Some(name) = value.as_str() else { return Err(format!("`{command}.name` must be a string.")) };
+    let len = name.chars().count();
+    if name.trim().is_empty() || len > 128 {
+        return Err(format!("`{command}.name` must contain 1 to 128 characters."));
+    }
+    Ok(())
+}
+
+fn optional_bool(command: &str, map: Option<&serde_json::Map<String, Value>>, key: &str) -> Result<(), String> {
+    if map.and_then(|map| map.get(key)).is_some_and(|value| !value.is_boolean()) {
+        return Err(format!("`{command}.{key}` must be a boolean."));
+    }
+    Ok(())
+}
+
+fn optional_number(command: &str, map: Option<&serde_json::Map<String, Value>>, key: &str, min: f64, max: f64) -> Result<(), String> {
+    let Some(value) = map.and_then(|map| map.get(key)) else { return Ok(()) };
+    let Some(number) = value.as_f64() else { return Err(format!("`{command}.{key}` must be a number.")) };
+    if !number.is_finite() || !(min..=max).contains(&number) {
+        return Err(format!("`{command}.{key}` must be between {min} and {max}."));
+    }
+    Ok(())
+}
+
+fn optional_blend(command: &str, map: Option<&serde_json::Map<String, Value>>) -> Result<(), String> {
+    let Some(value) = map.and_then(|map| map.get("blend")) else { return Ok(()) };
+    let Some(blend) = value.as_str() else { return Err(format!("`{command}.blend` must be a string.")) };
+    let norm = |value: &str| value.to_ascii_lowercase().replace([' ', '_', '-', '(', ')'], "");
+    let want = norm(blend);
+    let known = std::iter::once(photocraft_color::BlendMode::PassThrough)
+        .chain(photocraft_color::BlendMode::LAYER_MODES)
+        .any(|mode| norm(mode.label()) == want || norm(&format!("{mode:?}")) == want);
+    if !known {
+        return Err(format!("`{blend}` is not a supported blend mode."));
+    }
+    Ok(())
+}
+
+fn curve_points(command: &str, map: Option<&serde_json::Map<String, Value>>) -> Result<(), String> {
+    let Some(value) = map.and_then(|map| map.get("points")) else { return Ok(()) };
+    let Some(points) = value.as_array() else { return Err(format!("`{command}.points` must be an array.")) };
+    if !(2..=32).contains(&points.len()) {
+        return Err(format!("`{command}.points` must contain between 2 and 32 points."));
+    }
+    let mut previous_input = None;
+    for point in points {
+        let Some(pair) = point.as_array() else { return Err(format!("Every `{command}.points` entry must be [input, output].")) };
+        if pair.len() != 2 {
+            return Err(format!("Every `{command}.points` entry must contain exactly two numbers."));
+        }
+        let (Some(input), Some(output)) = (pair.first().and_then(Value::as_f64), pair.get(1).and_then(Value::as_f64)) else {
+            return Err(format!("Every `{command}.points` entry must contain numbers."));
+        };
+        if !input.is_finite() || !output.is_finite() || !(0.0..=255.0).contains(&input) || !(0.0..=255.0).contains(&output) {
+            return Err(format!("`{command}.points` values must be finite numbers from 0 to 255."));
+        }
+        if previous_input.is_some_and(|previous| input <= previous) {
+            return Err(format!("`{command}.points` inputs must be strictly increasing."));
+        }
+        previous_input = Some(input);
+    }
+    Ok(())
+}
+
+fn validate_safe_params(command: &str, params: &Value) -> Result<(), String> {
+    let map = param_object(command, params)?;
+    match command {
+        "layer.new.layer" | "layer.new.group" | "layer.groupLayers" => {
+            only_keys(command, map, &["name"])?;
+            optional_name(command, map)
+        }
+        "layer.duplicate"
+        | "layer.arrange.bringForward"
+        | "layer.arrange.sendBackward"
+        | "layer.arrange.bringToFront"
+        | "layer.arrange.sendToBack"
+        | "layer.createClippingMask"
+        | "layer.releaseClippingMask"
+        | "layer.newAdjustmentLayer.blackWhite"
+        | "layer.newAdjustmentLayer.invert" => no_params(command, map),
+        "layer.setProps" => {
+            only_keys(command, map, &["name", "visible", "opacity", "fill", "blend"])?;
+            if map.is_none_or(serde_json::Map::is_empty) {
+                return Err("AI command `layer.setProps` needs at least one editable property.".into());
+            }
+            optional_name(command, map)?;
+            optional_bool(command, map, "visible")?;
+            optional_number(command, map, "opacity", 0.0, 1.0)?;
+            optional_number(command, map, "fill", 0.0, 1.0)?;
+            optional_blend(command, map)
+        }
+        "layer.newAdjustmentLayer.brightnessContrast" => {
+            only_keys(command, map, &["brightness", "contrast"])?;
+            optional_number(command, map, "brightness", -150.0, 150.0)?;
+            optional_number(command, map, "contrast", -50.0, 100.0)
+        }
+        "layer.newAdjustmentLayer.vibrance" => {
+            only_keys(command, map, &["vibrance", "saturation"])?;
+            optional_number(command, map, "vibrance", -100.0, 100.0)?;
+            optional_number(command, map, "saturation", -100.0, 100.0)
+        }
+        "layer.newAdjustmentLayer.curves" => {
+            only_keys(command, map, &["points"])?;
+            curve_points(command, map)
+        }
+        _ => Err(format!("Command `{command}` has no reviewed AI parameter policy.")),
+    }
+}
 
 /// Validate the trust boundary between a planner and the editor engine.
 fn validate_steps(steps: &[AiStep], require_executable: bool) -> Result<(), String> {
@@ -107,9 +251,7 @@ fn validate_steps(steps: &[AiStep], require_executable: bool) -> Result<(), Stri
         if !SAFE_COMMANDS.contains(&command) {
             return Err(format!("Command `{command}` is not in the AI safety allowlist."));
         }
-        if !step.params.is_object() && !step.params.is_null() {
-            return Err(format!("Parameters for `{command}` must be a JSON object."));
-        }
+        validate_safe_params(command, &step.params)?;
     }
     Ok(())
 }
@@ -142,20 +284,29 @@ pub fn planner_contract() -> Value {
             }]
         },
         "allowedCommands": [
-            {"id": "layer.new.layer", "params": {"name": "optional string"}},
-            {"id": "layer.new.group", "params": {"name": "optional string"}},
+            {"id": "layer.new.layer", "params": {"name": "optional non-empty string, max 128 chars"}},
+            {"id": "layer.new.group", "params": {"name": "optional non-empty string, max 128 chars"}},
+            {"id": "layer.groupLayers", "params": {"name": "optional group name; groups the current selection"}},
             {"id": "layer.duplicate", "params": {}},
-            {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "number", "contrast": "number"}},
-            {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional array of [input, output] points"}},
-            {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "number", "saturation": "number"}},
+            {"id": "layer.setProps", "params": {"name": "optional string", "visible": "optional bool", "opacity": "optional number 0..1", "fill": "optional number 0..1", "blend": "optional supported blend-mode name"}},
+            {"id": "layer.arrange.bringForward", "params": {}},
+            {"id": "layer.arrange.sendBackward", "params": {}},
+            {"id": "layer.arrange.bringToFront", "params": {}},
+            {"id": "layer.arrange.sendToBack", "params": {}},
+            {"id": "layer.createClippingMask", "params": {}},
+            {"id": "layer.releaseClippingMask", "params": {}},
+            {"id": "layer.newAdjustmentLayer.brightnessContrast", "params": {"brightness": "optional number -150..150", "contrast": "optional number -50..100"}},
+            {"id": "layer.newAdjustmentLayer.curves", "params": {"points": "optional 2..32 [input, output] pairs; each value 0..255; inputs strictly increasing"}},
+            {"id": "layer.newAdjustmentLayer.vibrance", "params": {"vibrance": "optional number -100..100", "saturation": "optional number -100..100"}},
             {"id": "layer.newAdjustmentLayer.blackWhite", "params": {}},
             {"id": "layer.newAdjustmentLayer.invert", "params": {}}
         ],
         "rules": [
             "Return JSON only, with exactly title and steps at the top level.",
-            "Never invent a command id. Use null when the request needs a capability outside the allowed commands.",
+            "Never invent a command id or parameter. Use null when the request needs a capability outside the allowed commands.",
+            "Never send a layer id. All allowed layer commands intentionally operate on the active layer or current selection.",
             "Prefer non-destructive adjustment layers and keep the document editable.",
-            "Do not claim a vision, selection, export, filesystem, or network action happened when no allowed command can perform it.",
+            "Do not claim a vision, selection, delete, export, filesystem, or network action happened when no allowed command can perform it.",
             "Keep plans short and directly related to the user's request."
         ]
     })
@@ -190,8 +341,30 @@ pub fn plan(prompt: &str) -> PlannedRequest {
     if has(&["new layer", "empty layer", "yeni katman", "boş katman", "bos katman"]) {
         steps.push(AiStep::command("Create a new layer", "layer.new.layer", json!({"name": "AI Layer"})));
     }
-    if has(&["new group", "group layers", "yeni grup", "grup oluştur", "grup olustur"]) {
+    if has(&["new group", "yeni grup", "grup oluştur", "grup olustur"]) {
         steps.push(AiStep::command("Create a layer group", "layer.new.group", json!({"name": "AI Group"})));
+    }
+    if has(&["group layers", "group selected layers", "katmanları grupla", "katmanlari grupla"]) {
+        steps.push(AiStep::command("Group the selected layers", "layer.groupLayers", json!({})));
+    }
+    if has(&["hide active layer", "hide layer", "katmanı gizle", "katmani gizle"]) {
+        steps.push(AiStep::command("Hide the active layer", "layer.setProps", json!({"visible": false})));
+    } else if has(&["show active layer", "show layer", "katmanı göster", "katmani goster"]) {
+        steps.push(AiStep::command("Show the active layer", "layer.setProps", json!({"visible": true})));
+    }
+    if has(&["bring to front", "move to front", "en öne getir", "en one getir"]) {
+        steps.push(AiStep::command("Bring the active layer to front", "layer.arrange.bringToFront", json!({})));
+    } else if has(&["send to back", "move to back", "en arkaya gönder", "en arkaya gonder"]) {
+        steps.push(AiStep::command("Send the active layer to back", "layer.arrange.sendToBack", json!({})));
+    } else if has(&["bring forward", "move forward", "öne getir", "one getir"]) {
+        steps.push(AiStep::command("Bring the active layer forward", "layer.arrange.bringForward", json!({})));
+    } else if has(&["send backward", "move backward", "arkaya gönder", "arkaya gonder"]) {
+        steps.push(AiStep::command("Send the active layer backward", "layer.arrange.sendBackward", json!({})));
+    }
+    if has(&["release clipping mask", "remove clipping mask", "kırpma maskesini kaldır", "kirpma maskesini kaldir"]) {
+        steps.push(AiStep::command("Release the clipping mask", "layer.releaseClippingMask", json!({})));
+    } else if has(&["create clipping mask", "make clipping mask", "kırpma maskesi oluştur", "kirpma maskesi olustur"]) {
+        steps.push(AiStep::command("Create a clipping mask", "layer.createClippingMask", json!({})));
     }
     if has(&["black and white", "black & white", "monochrome", "siyah beyaz"]) {
         steps.push(AiStep::command("Add a Black & White adjustment", "layer.newAdjustmentLayer.blackWhite", json!({})));
@@ -609,6 +782,71 @@ mod tests {
     }
 
     #[test]
+    fn set_props_allows_only_reviewed_editable_fields() {
+        let safe = vec![AiStep::command(
+            "Style active layer",
+            "layer.setProps",
+            json!({"name": "Hero", "opacity": 0.72, "fill": 0.9, "blend": "Multiply", "visible": true}),
+        )];
+        assert!(validate(&safe).is_ok());
+
+        for params in [json!({"locked": true}), json!({"channels": [true, false, true]}), json!({"layer": 123}), json!({"opacity": 1.5})] {
+            let plan = vec![AiStep::command("Unsafe property", "layer.setProps", params)];
+            assert!(validate(&plan).is_err());
+        }
+    }
+
+    #[test]
+    fn provider_contract_and_runtime_allowlist_stay_in_sync() {
+        let contract = planner_contract();
+        let Some(commands) = contract.get("allowedCommands").and_then(Value::as_array) else {
+            panic!("planner contract has no allowedCommands array");
+        };
+        let ids: Vec<&str> = commands.iter().filter_map(|command| command.get("id").and_then(Value::as_str)).collect();
+        assert_eq!(ids.len(), SAFE_COMMANDS.len());
+        for command in SAFE_COMMANDS {
+            assert!(ids.contains(command), "provider contract is missing {command}");
+        }
+    }
+
+    #[test]
+    fn commands_without_params_reject_layer_ids() {
+        for command in ["layer.duplicate", "layer.arrange.bringToFront", "layer.createClippingMask"] {
+            let plan = vec![AiStep::command("Target arbitrary layer", command, json!({"layer": 42}))];
+            assert!(validate(&plan).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn adjustment_params_are_bounded_and_unknown_fields_are_rejected() {
+        assert!(validate(&[AiStep::command("Tone", "layer.newAdjustmentLayer.brightnessContrast", json!({"brightness": 25, "contrast": 12}),)]).is_ok());
+        assert!(validate(&[AiStep::command("Legacy tone", "layer.newAdjustmentLayer.brightnessContrast", json!({"legacy": true}),)]).is_err());
+        assert!(validate(&[AiStep::command("Too vibrant", "layer.newAdjustmentLayer.vibrance", json!({"vibrance": 101}))]).is_err());
+    }
+
+    #[test]
+    fn curves_require_ordered_bounded_points() {
+        assert!(
+            validate(&[AiStep::command("Curve", "layer.newAdjustmentLayer.curves", json!({"points": [[0, 0], [96, 88], [180, 194], [255, 255]]}),)]).is_ok()
+        );
+        for points in [json!([[0, 0]]), json!([[0, 0], [0, 5]]), json!([[0, 0], [256, 255]])] {
+            assert!(validate(&[AiStep::command("Bad curve", "layer.newAdjustmentLayer.curves", json!({"points": points}))]).is_err());
+        }
+    }
+
+    #[test]
+    fn local_planner_knows_safe_layer_structure_actions() {
+        let grouped = plan("Katmanları grupla");
+        assert_eq!(grouped.steps.first().and_then(|step| step.command.as_deref()), Some("layer.groupLayers"));
+        assert!(validate(&grouped.steps).is_ok());
+
+        let hidden = plan("Hide active layer");
+        assert_eq!(hidden.steps.first().and_then(|step| step.command.as_deref()), Some("layer.setProps"));
+        assert_eq!(hidden.steps.first().and_then(|step| step.params.get("visible")).and_then(Value::as_bool), Some(false));
+        assert!(validate(&hidden.steps).is_ok());
+    }
+
+    #[test]
     fn model_plan_is_revalidated_after_the_service_boundary() {
         let services = crate::Services {
             ai_plan: Some(Box::new(|_| {
@@ -625,6 +863,21 @@ mod tests {
         assert!(app.ui.ai.plan.is_empty());
         assert!(app.ui.ai.status_error);
         assert!(app.ui.ai.status.contains("allowlist"));
+    }
+
+    #[test]
+    fn reviewed_layer_property_plan_executes_on_the_active_layer() {
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.run("layer.new.layer", json!({"name": "Before"})).unwrap();
+        app.ui.ai.plan = vec![AiStep::command("Style layer", "layer.setProps", json!({"name": "Hero", "opacity": 0.5, "blend": "Multiply"}))];
+        run_plan(&mut app);
+        let state = app.session.active().expect("document");
+        let layer = state.active_layer.and_then(|id| state.doc.layer(id)).expect("active layer");
+        assert_eq!(layer.name, "Hero");
+        assert!((layer.opacity - 0.5).abs() < 1e-6);
+        assert_eq!(layer.blend, photocraft_color::BlendMode::Multiply);
+        assert!(!app.ui.ai.status_error);
     }
 
     #[test]
