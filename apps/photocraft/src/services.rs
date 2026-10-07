@@ -19,6 +19,14 @@ const OPEN_EXTS: &[&str] = &[
     "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd",
 ];
 
+/// Folder-batch inputs. Preset files are intentionally excluded: V1 processes image/document files
+/// non-recursively and always writes new PNG copies.
+const BATCH_INPUT_EXTS: &[&str] = &[
+    "pcraft", "psd", "psb", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam", "pfm",
+    "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf",
+];
+const MAX_BATCH_FAILURES: usize = 20;
+
 /// File › Save As formats: (filter name, extensions). The filter matching the suggested name's
 /// extension comes first, so a .pcraft document saves as .pcraft by default and everything else
 /// keeps defaulting to Photoshop.
@@ -73,6 +81,85 @@ fn recovery_dir() -> Option<PathBuf> {
 /// the preferences go through here, so a failed or interrupted save never destroys the old file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     photocraft_format::atomic_write(path, bytes).map_err(|e| e.to_string())
+}
+
+fn is_batch_input(path: &Path) -> bool {
+    let ext = path.extension().and_then(|ext| ext.to_str()).map(str::to_ascii_lowercase);
+    ext.as_deref().is_some_and(|ext| BATCH_INPUT_EXTS.contains(&ext))
+}
+
+fn batch_output_path(input: &Path, output_dir: &Path) -> PathBuf {
+    let stem = input.file_stem().and_then(|stem| stem.to_str()).filter(|stem| !stem.is_empty()).unwrap_or("image");
+    output_dir.join(format!("{stem}-ai.png"))
+}
+
+fn is_generated_batch_output(path: &Path) -> bool {
+    path.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.to_ascii_lowercase().ends_with("-ai"))
+}
+
+fn process_batch_file(path: &Path, output_dir: &Path, workflow: &photocraft_ui_egui::ai_panel::AiWorkflow) -> Result<(), String> {
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| "input file name is not valid UTF-8".to_string())?;
+    let bytes = std::fs::read(path).map_err(|error| format!("read failed: {error}"))?;
+    let imported = photocraft_io::import(name, &bytes).map_err(|error| format!("import failed: {error}"))?;
+
+    let mut session = photocraft_engine::Session::new();
+    session.add_document(imported.document, None);
+    photocraft_ui_egui::ai_panel::execute_batch_steps(&mut session, &workflow.steps).map_err(|error| format!("workflow failed: {error}"))?;
+    let doc = session.active().map(|state| state.doc.clone()).ok_or_else(|| "workflow produced no active document".to_string())?;
+
+    let output = batch_output_path(path, output_dir);
+    if output.exists() {
+        return Err("output already exists".into());
+    }
+    let output_name = output.to_string_lossy();
+    let exported =
+        photocraft_io::export(doc.as_ref(), &output_name, &photocraft_io::ExportOptions::default()).map_err(|error| format!("export failed: {error}"))?;
+    write_atomic(&output, &exported.bytes).map_err(|error| format!("write failed: {error}"))
+}
+
+fn run_ai_batch(request: photocraft_ui_egui::ai_panel::AiBatchRequest) -> Result<photocraft_ui_egui::ai_panel::AiBatchResult, String> {
+    photocraft_ui_egui::ai_panel::validate(&request.workflow.steps)?;
+    let input_dir = PathBuf::from(&request.input_dir);
+    let output_dir = PathBuf::from(&request.output_dir);
+    if !input_dir.is_dir() {
+        return Err("Batch source is not a readable directory.".into());
+    }
+    if !output_dir.is_dir() {
+        return Err("Batch output is not a writable directory.".into());
+    }
+
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&input_dir).map_err(|error| format!("Couldn't read batch source folder: {error}"))? {
+        let entry = entry.map_err(|error| format!("Couldn't inspect batch source folder: {error}"))?;
+        if entry.file_type().map_err(|error| format!("Couldn't inspect batch input: {error}"))?.is_file() {
+            files.push(entry.path());
+        }
+    }
+    files.sort();
+
+    let mut result = photocraft_ui_egui::ai_panel::AiBatchResult { discovered: files.len(), ..Default::default() };
+    for path in files {
+        if !is_batch_input(&path) || is_generated_batch_output(&path) {
+            result.skipped += 1;
+            continue;
+        }
+        let output = batch_output_path(&path, &output_dir);
+        if output.exists() {
+            result.skipped += 1;
+            continue;
+        }
+        match process_batch_file(&path, &output_dir, &request.workflow) {
+            Ok(()) => result.succeeded += 1,
+            Err(error) => {
+                result.failed += 1;
+                if result.failures.len() < MAX_BATCH_FAILURES {
+                    let name = path.file_name().map(|name| name.to_string_lossy()).unwrap_or_else(|| path.as_os_str().to_string_lossy());
+                    result.failures.push(format!("{name}: {error}"));
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Model-backed planning is opt-in: no key means the UI stays entirely local. Secrets are read
@@ -197,6 +284,7 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
             }
             Some(d.save_file()?.to_string_lossy().to_string())
         })),
+        pick_folder: Some(Box::new(|title: &str| rfd::FileDialog::new().set_title(title).pick_folder().map(|path| path.to_string_lossy().to_string()))),
         write: Some(Box::new(|path: &str, bytes: &[u8]| write_atomic(Path::new(path), bytes))),
         automation_read,
         automation_write,
@@ -267,6 +355,13 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         // Set by main once the Apple-event handlers are connected (macOS).
         os_events: None,
         ai_plan: ai_planner(),
+        ai_batch: Some(Box::new(|request| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(run_ai_batch(request));
+            });
+            rx
+        })),
         // Set by main, which starts loading the store before the window opens.
         preset_store: None,
     }
@@ -354,5 +449,52 @@ mod ai_tests {
     fn extracts_output_text_from_responses_payload() {
         let value = serde_json::json!({"output":[{"type":"message","content":[{"type":"output_text","text":"{\"title\":\"x\",\"steps\":[]}"}]}]});
         assert_eq!(response_output_text(&value), Some(r#"{"title":"x","steps":[]}"#));
+    }
+
+    #[test]
+    fn batch_output_names_are_safe_and_generated_outputs_are_skipped() {
+        let out = batch_output_path(Path::new("hero.photo.JPG"), Path::new("out"));
+        assert_eq!(out, Path::new("out").join("hero.photo-ai.png"));
+        assert!(is_batch_input(Path::new("input.PSD")));
+        assert!(!is_batch_input(Path::new("notes.txt")));
+        assert!(is_generated_batch_output(Path::new("hero-ai.png")));
+    }
+
+    #[test]
+    fn folder_batch_writes_a_new_png_without_mutating_the_source() {
+        use photocraft_ui_egui::ai_panel::{AiBatchRequest, AiStep, AiWorkflow};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("photocraft-ai-batch-{}-{unique}", std::process::id()));
+        let input = root.join("input");
+        let output = root.join("output");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(&output).unwrap();
+
+        let mut doc = Document::new("source", Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+        doc.layers.push(Layer::raster("Background", doc.pixel_format()));
+        let source = input.join("source.png");
+        let source_bytes = export_flat(&doc, source.to_str().unwrap()).unwrap();
+        std::fs::write(&source, &source_bytes).unwrap();
+
+        let workflow = AiWorkflow {
+            name: "Invert".into(),
+            steps: vec![AiStep {
+                label: "Invert".into(),
+                command: Some("layer.newAdjustmentLayer.invert".into()),
+                params: serde_json::json!({}),
+                note: String::new(),
+            }],
+        };
+        let result =
+            run_ai_batch(AiBatchRequest { workflow, input_dir: input.to_string_lossy().to_string(), output_dir: output.to_string_lossy().to_string() })
+                .unwrap();
+
+        assert_eq!(result.succeeded, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+        assert!(output.join("source-ai.png").is_file());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

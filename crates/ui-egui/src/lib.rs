@@ -148,6 +148,8 @@ pub struct ExportSettings {
 pub type ExportFn = Box<dyn Fn(&Document, &str, &ExportSettings) -> Result<(Vec<u8>, Vec<String>), String>>;
 pub type PickOpenFn = Box<dyn FnMut() -> Option<(String, Vec<u8>)>>;
 pub type PickSaveFn = Box<dyn FnMut(&str) -> Option<String>>;
+/// Show a folder picker with a caller-provided title; returns the selected directory path.
+pub type PickFolderFn = Box<dyn FnMut(&str) -> Option<String>>;
 pub type WriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
 /// Read bytes through the desktop control session's authorized read root.
 pub type AutomationReadFn = Box<dyn FnMut(&str) -> Result<(String, Vec<u8>), String>>;
@@ -181,6 +183,9 @@ pub type OsEventsFn = Box<dyn FnMut() -> Vec<OsEvent>>;
 /// Start an AI planning request. The platform service performs network I/O off the UI thread and
 /// returns a receiver that resolves to a validated editor plan or an error.
 pub type AiPlanFn = Box<dyn Fn(ai_panel::AiPlannerRequest) -> Receiver<Result<ai_panel::PlannedRequest, String>>>;
+/// Start a saved-workflow folder batch. Native implementations run off the UI thread and return
+/// a summary without ever mutating the source files.
+pub type AiBatchFn = Box<dyn Fn(ai_panel::AiBatchRequest) -> Receiver<Result<ai_panel::AiBatchResult, String>>>;
 
 /// Platform services injected by the app binary (file dialogs, codecs), keeping this crate free of
 /// I/O dependencies.
@@ -194,6 +199,8 @@ pub struct Services {
     pub pick_open: Option<PickOpenFn>,
     /// Show a "save file" dialog; returns a path/name to write.
     pub pick_save: Option<PickSaveFn>,
+    /// Show a native folder picker. Used by desktop-only batch workflows.
+    pub pick_folder: Option<PickFolderFn>,
     /// Write bytes to a path (native) or trigger a download (web).
     pub write: Option<WriteFn>,
     /// File access used only by control/MCP requests. Interactive dialogs keep
@@ -227,6 +234,8 @@ pub struct Services {
     pub os_events: Option<OsEventsFn>,
     /// Optional model-backed AI planner. When absent, AI Studio uses its deterministic local planner.
     pub ai_plan: Option<AiPlanFn>,
+    /// Optional desktop batch runner for applying one validated saved workflow to a folder.
+    pub ai_batch: Option<AiBatchFn>,
     /// The persistent brush preset store, loading in the background (desktop; see
     /// `photocraft_engine::preset_store`). Attached to the session once it arrives; without
     /// one, brush presets are session-only (web, tests).
@@ -371,6 +380,10 @@ pub struct PhotocraftApp {
     pub ai_plan_rx: Option<Receiver<Result<ai_panel::PlannedRequest, String>>>,
     /// Prompt paired with `ai_plan_rx`, so edits typed while a request is running cannot relabel its result.
     pub ai_plan_prompt: Option<String>,
+    /// In-flight saved-workflow folder batch. Runtime-only; source files remain untouched.
+    pub ai_batch_rx: Option<Receiver<Result<ai_panel::AiBatchResult, String>>>,
+    /// Workflow name paired with `ai_batch_rx` for result messaging.
+    pub ai_batch_name: Option<String>,
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     live_tokens: theme::live::LiveTokens,
 }
@@ -447,6 +460,8 @@ impl PhotocraftApp {
             jobs: Default::default(),
             ai_plan_rx: None,
             ai_plan_prompt: None,
+            ai_batch_rx: None,
+            ai_batch_name: None,
             #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
             live_tokens: theme::live::LiveTokens::from_env(),
         };

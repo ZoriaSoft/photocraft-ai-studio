@@ -79,6 +79,26 @@ pub struct AiWorkflow {
     pub steps: Vec<AiStep>,
 }
 
+/// One desktop folder-batch request. The native runner revalidates `workflow` before touching any
+/// output and never writes to `input_dir`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiBatchRequest {
+    pub workflow: AiWorkflow,
+    pub input_dir: String,
+    pub output_dir: String,
+}
+
+/// Summary returned after a folder batch finishes. `skipped` includes unsupported inputs and safe
+/// no-overwrite collisions; `failures` contains a bounded set of per-file diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AiBatchResult {
+    pub discovered: usize,
+    pub succeeded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub failures: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct WorkflowStore {
@@ -299,6 +319,33 @@ fn validate_steps(steps: &[AiStep], require_executable: bool) -> Result<(), Stri
 /// A plan may only run when every step maps to a reviewed editor command.
 pub fn validate(steps: &[AiStep]) -> Result<(), String> {
     validate_steps(steps, true)
+}
+
+/// Execute one already-reviewed workflow against the active document of a standalone session.
+///
+/// Folder batches create a fresh session per input file. That gives each file transaction-like
+/// isolation: if one command fails, the temporary session is discarded and no output is written.
+pub fn execute_batch_steps(session: &mut photocraft_engine::Session, steps: &[AiStep]) -> Result<usize, String> {
+    validate(steps)?;
+    let Some((doc_id, revision)) = session.active().map(|state| (state.doc.id.0, state.revision)) else {
+        return Err("Batch workflow has no document to edit.".into());
+    };
+    let coalesce = format!("ai-batch:{doc_id}:{revision}");
+    let mut completed = 0usize;
+    for step in steps {
+        let Some(command) = step.command.as_deref() else {
+            return Err(format!("{} needs an AI capability that is not connected yet.", step.label));
+        };
+        let mut params = match &step.params {
+            Value::Null => serde_json::Map::new(),
+            Value::Object(map) => map.clone(),
+            _ => return Err(format!("Invalid parameters for `{command}`.")),
+        };
+        params.insert("coalesce".into(), Value::String(coalesce.clone()));
+        session.execute(command, Value::Object(params)).map_err(|error| error.to_string())?;
+        completed += 1;
+    }
+    Ok(completed)
 }
 
 /// Validate model output before it is accepted into UI state. Pending steps are allowed so the
@@ -526,6 +573,68 @@ fn load_workflow(app: &mut PhotocraftApp, index: usize) -> Result<(), String> {
     Ok(())
 }
 
+fn start_batch(app: &mut PhotocraftApp, index: usize) -> Result<(), String> {
+    if app.ai_batch_rx.is_some() {
+        return Err("A batch workflow is already running.".into());
+    }
+    let Some(workflow) = app.ui.ai.saved_workflows.get(index).cloned() else {
+        return Err("Saved workflow no longer exists.".into());
+    };
+    validate(&workflow.steps)?;
+
+    let input_dir = match app.services.pick_folder.as_mut() {
+        Some(pick) => pick("Choose batch source folder"),
+        None => return Err("Folder batch is available in the desktop app.".into()),
+    };
+    let Some(input_dir) = input_dir else { return Ok(()) };
+    let output_dir = match app.services.pick_folder.as_mut() {
+        Some(pick) => pick("Choose batch output folder"),
+        None => return Err("Folder batch is available in the desktop app.".into()),
+    };
+    let Some(output_dir) = output_dir else { return Ok(()) };
+    let Some(run) = app.services.ai_batch.as_ref() else {
+        return Err("Batch workflow service is not configured.".into());
+    };
+
+    let name = workflow.name.clone();
+    app.ai_batch_rx = Some(run(AiBatchRequest { workflow, input_dir, output_dir }));
+    app.ai_batch_name = Some(name.clone());
+    app.ui.ai.status = format!("Running batch: {name} · originals stay untouched");
+    app.ui.ai.status_error = false;
+    Ok(())
+}
+
+fn poll_batch(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use std::sync::mpsc::TryRecvError;
+    let result = app.ai_batch_rx.as_ref().and_then(|rx| match rx.try_recv() {
+        Ok(result) => Some(result),
+        Err(TryRecvError::Empty) => None,
+        Err(TryRecvError::Disconnected) => Some(Err("Batch worker disconnected before returning a result.".into())),
+    });
+    if app.ai_batch_rx.is_some() && result.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(120));
+    }
+    let Some(result) = result else { return };
+    app.ai_batch_rx = None;
+    let name = app.ai_batch_name.take().unwrap_or_else(|| "workflow".into());
+    match result {
+        Ok(summary) => {
+            app.ui.ai.status = format!(
+                "Batch finished · {name}: {} written, {} skipped, {} failed ({} discovered)",
+                summary.succeeded, summary.skipped, summary.failed, summary.discovered
+            );
+            if let Some(first) = summary.failures.first() {
+                app.ui.ai.status.push_str(&format!(" · first error: {first}"));
+            }
+            app.ui.ai.status_error = summary.failed > 0;
+        }
+        Err(error) => {
+            app.ui.ai.status = format!("Batch failed · {name}: {error}");
+            app.ui.ai.status_error = true;
+        }
+    }
+}
+
 fn remember_prompt(app: &mut PhotocraftApp, prompt: &str) {
     let ai = &mut app.ui.ai;
     ai.prompt = prompt.trim().to_string();
@@ -681,6 +790,7 @@ fn run_plan(app: &mut PhotocraftApp) {
 
 pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, workflows: bool) {
     poll_model_plan(app, ui.ctx());
+    poll_batch(app, ui.ctx());
     if workflows {
         workflows_panel(app, ui);
     } else {
@@ -984,6 +1094,12 @@ fn empty_state(ui: &mut egui::Ui, t: &Tokens) {
         });
 }
 
+enum SavedWorkflowAction {
+    Use(usize),
+    Batch(usize),
+    Remove(usize),
+}
+
 fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     ui.spacing_mut().item_spacing.y = 8.0;
@@ -1005,6 +1121,11 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 
     ui.add_space(7.0);
     ui.label(RichText::new("SAVED WORKFLOWS").size(9.5).color(t.text_faint).strong());
+    ui.label(
+        RichText::new("Batch runs a saved recipe on one folder and writes new *-ai.png copies; source files are never overwritten.")
+            .size(9.5)
+            .color(t.text_faint),
+    );
     if app.ui.ai.saved_workflows.is_empty() {
         egui::Frame::new()
             .fill(t.field)
@@ -1018,6 +1139,7 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     } else {
         let workflows = app.ui.ai.saved_workflows.clone();
         let mut action = None;
+        let batch_ready = app.ai_batch_rx.is_none() && app.services.ai_batch.is_some() && app.services.pick_folder.is_some();
         for (index, workflow) in workflows.iter().enumerate() {
             egui::Frame::new()
                 .fill(t.card)
@@ -1036,23 +1158,36 @@ fn workflows_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if crate::icons::button(ui, "trash", 24.0, false, "Remove saved workflow").clicked() {
-                                action = Some((index, false));
+                                action = Some(SavedWorkflowAction::Remove(index));
                             }
+                            ui.add_enabled_ui(batch_ready, |ui| {
+                                if crate::widgets::secondary_button(ui, "Batch", 62.0).clicked() {
+                                    action = Some(SavedWorkflowAction::Batch(index));
+                                }
+                            });
                             if crate::widgets::secondary_button(ui, "Use", 56.0).clicked() {
-                                action = Some((index, true));
+                                action = Some(SavedWorkflowAction::Use(index));
                             }
                         });
                     });
                 });
         }
-        if let Some((index, load)) = action {
-            let result = if load { load_workflow(app, index) } else { remove_saved_workflow(app, index) };
+        if let Some(action) = action {
+            let result = match action {
+                SavedWorkflowAction::Use(index) => load_workflow(app, index),
+                SavedWorkflowAction::Batch(index) => start_batch(app, index),
+                SavedWorkflowAction::Remove(index) => remove_saved_workflow(app, index),
+            };
             if let Err(error) = result {
                 app.ui.ai.status = error;
                 app.ui.ai.status_error = true;
             }
         }
     }
+
+    ui.add_space(5.0);
+    let status_color = if app.ui.ai.status_error { t.danger } else { t.text_dim };
+    ui.label(RichText::new(&app.ui.ai.status).size(10.0).color(status_color));
 }
 
 fn workflow_card(ui: &mut egui::Ui, t: &Tokens, icon: &str, title: &str, subtitle: &str) -> bool {

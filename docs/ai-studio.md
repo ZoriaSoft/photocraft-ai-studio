@@ -38,6 +38,19 @@ If the model request fails and the local planner understands the request, AI Stu
 A validated plan can be saved as a reusable workflow from the Assistant tab. Desktop builds persist these recipes separately as `ai-workflows.json` in the application config directory. The file stores only the workflow name and validated editor steps; the original natural-language prompt is not persisted with the recipe.
 
 Saved workflows are treated as untrusted input when reloaded: every recipe is passed through the same command and parameter validator again, invalid entries are discarded, and future schema versions that this build does not understand are rejected.
+
+## Batch Workflows V1
+
+Desktop builds can apply any validated saved workflow to a folder from the Workflows tab. V1 is intentionally conservative:
+
+- Processing is non-recursive and each input file runs in a fresh engine session.
+- The saved workflow is revalidated before the batch starts and again by the execution boundary.
+- Source files are never modified. Outputs are new PNG files named `<stem>-ai.png` in a separately selected output folder.
+- Existing output files are skipped rather than overwritten, and prior `*-ai.*` outputs in the source folder are ignored.
+- Unsupported files are skipped. A failure in one image does not stop the rest of the folder; the UI reports written, skipped and failed counts plus the first per-file error.
+- The batch runner works off the UI thread so planning and editor interaction do not need to own the temporary documents.
+
+This first version deliberately omits recursive traversal, overwrite mode, format selection and destructive in-place processing. Those can be added later without weakening the default safety boundary.
 ## Plan review surface
 
 Before execution, AI Studio presents each step in editor language rather than exposing raw command IDs as the primary UI. The review card shows the number of steps, `EDITABLE`, and `ONE UNDO`; layer property changes are summarized as values such as opacity and blend mode, while tonal adjustments show their effective settings. Raw command IDs remain available only as hover detail for diagnostics.

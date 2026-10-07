@@ -65,7 +65,7 @@ Model planner setup: [`docs/ai-studio.md`](docs/ai-studio.md)
 - [ ] Open PNG, JPEG, WebP and PSD documents.
 - [ ] Core layer / mask / text operations.
 - [ ] Product-photo workflow presets.
-- [ ] Batch workflow execution.
+- [x] Batch workflow execution from saved workflows (desktop V1: source folder → safe PNG copies).
 - [ ] Export PNG, JPEG, WebP and PSD where supported by the engine.
 
 ## Architecture strategy
