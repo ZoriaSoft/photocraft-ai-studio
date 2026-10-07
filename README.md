@@ -8,6 +8,17 @@ PhotoCraft AI Studio explores a simpler way to edit real layered documents: keep
 
 This repository is at the **foundation / early prototype** stage. The current codebase is intentionally close to upstream PhotoCraft while we separate product identity, preserve compatibility, and build the first AI-native workflow layer.
 
+## AI Studio preview
+
+The AI Studio turns natural-language intent into reviewed, deterministic editor commands. Plans stay editable, run as one Undo transaction, and validated plans can be saved for reuse or safe folder batches.
+
+<p align="center">
+  <img src="docs/images/ai-studio-plan-review.png" alt="AI Studio plan review panel" width="49%">
+  <img src="docs/images/ai-studio-workflows.png" alt="AI Studio saved workflows and batch controls" width="49%">
+</p>
+
+<sub>Left: human-readable plan review with editable adjustment steps and one-Undo semantics. Right: reusable saved workflows with non-destructive Batch Workflows V1.</sub>
+
 ## Product direction
 
 The first target is a focused desktop creative studio with four primary surfaces:

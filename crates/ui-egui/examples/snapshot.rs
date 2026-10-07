@@ -7,6 +7,7 @@
 //! ```
 //!
 //! `--safe-gpu` draws the canvas on the CPU path, like the app's `--safe-gpu` launch.
+//! `--ai-demo assistant|workflows` opens AI Studio with deterministic documentation/demo state.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //!
 //! `--monitor 1366x768 --window-top 31` simulates the display the window is on (in points) and
@@ -29,6 +30,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = arg(&args, "--out").unwrap_or_else(|| "snapshot.png".into());
+    let ai_demo = arg(&args, "--ai-demo");
     let (w, h) = arg(&args, "--size")
         .and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?))))
         .unwrap_or((1440.0, 900.0));
@@ -37,7 +39,7 @@ fn main() {
     let script: Vec<(String, Value)> =
         arg(&args, "--script").map(|s| serde_json::from_str::<Vec<(String, Value)>>(&s).expect("--script must be [[method, params], …]")).unwrap_or_default();
 
-    let services = Services {
+    let mut services = Services {
         import: Some(Box::new(|name: &str, bytes: &[u8]| photocraft_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
         export: Some(Box::new(|doc: &photocraft_doc::Document, path: &str, settings: &photocraft_ui_egui::ExportSettings| {
             let mut opts = photocraft_io::ExportOptions::default();
@@ -49,7 +51,15 @@ fn main() {
         write: Some(Box::new(|path: &str, bytes: &[u8]| photocraft_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| e.to_string()))),
         ..Default::default()
     };
+    if ai_demo.as_deref() == Some("workflows") {
+        services.pick_folder = Some(Box::new(|_| None));
+        services.ai_batch = Some(Box::new(|_| {
+            let (_tx, rx) = std::sync::mpsc::channel();
+            rx
+        }));
+    }
     let open = arg(&args, "--open");
+    let ai_demo_for_app = ai_demo.clone();
     let safe_gpu = args.iter().any(|a| a == "--safe-gpu");
     // `--background-jobs`: long commands run as background jobs, as in the desktop app (#210).
     let background_jobs = args.iter().any(|a| a == "--background-jobs");
@@ -75,6 +85,31 @@ fn main() {
             }
             if let Some(path) = &open {
                 app.open_path(path).expect("open --open file");
+            }
+            match ai_demo_for_app.as_deref() {
+                Some("assistant") => {
+                    let prompt = "Make this brighter with a little more contrast and vibrance";
+                    let planned = photocraft_ui_egui::ai_panel::plan(prompt);
+                    app.ui.panels.ai = true;
+                    app.ui.ai.tab = 0;
+                    app.ui.ai.prompt = prompt.into();
+                    app.ui.ai.plan_title = planned.title;
+                    app.ui.ai.plan = planned.steps;
+                    app.ui.ai.workflow_name = "Product polish".into();
+                    app.ui.ai.status = "Plan ready for review".into();
+                }
+                Some("workflows") => {
+                    let polish = photocraft_ui_egui::ai_panel::plan("Make it brighter with a little more contrast and vibrance");
+                    let duplicate = photocraft_ui_egui::ai_panel::plan("Duplicate the active layer");
+                    app.ui.panels.ai = true;
+                    app.ui.ai.tab = 1;
+                    app.ui.ai.saved_workflows = vec![
+                        photocraft_ui_egui::ai_panel::AiWorkflow { name: "Product polish".into(), steps: polish.steps },
+                        photocraft_ui_egui::ai_panel::AiWorkflow { name: "Layer backup".into(), steps: duplicate.steps },
+                    ];
+                    app.ui.ai.status = "Saved workflows are ready for reuse or batch processing".into();
+                }
+                _ => {}
             }
             app
         });
