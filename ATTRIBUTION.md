@@ -43,6 +43,7 @@ The other built-in ICC profiles and the generated LUT looks are produced by code
 |---|---|---|---|---|
 | `docs/brand/LICENSE-brand.txt` | Upstream ArtCraft trademark terms (brand image assets are not distributed by this fork) | ArtCraft Team | getartcraft.com | Trademark terms; not part of the source-code license |
 | `docs/images/ai-studio-*.png` | PhotoCraft AI Studio documentation screenshots with locally generated synthetic demo artwork | PhotoCraft contributors / ZoriaSoft | Rendered offscreen with the repository `snapshot` example | MIT OR Apache-2.0 (UI and project-authored demo artwork) |
+| `docs/assets/ai-studio-flow.svg` | AI Studio pipeline diagram (animated README visual) | ZoriaSoft | Original work for this repository | MIT OR Apache-2.0 |
 
 The AI Studio screenshots use project-authored synthetic content and contain no external artwork. Details are recorded in [`docs/images/SOURCES.md`](docs/images/SOURCES.md).
 

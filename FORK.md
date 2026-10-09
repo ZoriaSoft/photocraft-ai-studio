@@ -19,3 +19,9 @@ This repository is a modified derivative of `storytold/photocraft`.
 ## Initial product boundary
 
 For the first MVP, avoid rewriting the editor engine. Build the AI/workflow layer around existing commands and only change lower-level crates when a concrete product requirement demands it.
+
+## CI
+
+This fork does not use hosted CI — `.github/workflows/` is removed. Run the
+checks from `AGENTS.md` §5 locally before pushing (`cargo test`/`clippy`,
+`cargo xtask` gates as applicable to the touched crates).

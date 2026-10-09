@@ -4,6 +4,8 @@
 
 PhotoCraft AI Studio explores a simpler way to edit real layered documents: keep the professional document engine, PSD compatibility, masks, text, vectors, filters and GPU compositing — but put natural-language commands, reusable workflows and automation at the center of the product.
 
+<p align="center"><img src="docs/assets/ai-studio-flow.svg" alt="AI Studio flow: prompt → local planner → reviewed validator → six-step editable plan → layered document, saved as reusable workflows" width="100%"></p>
+
 ## Project status
 
 This repository is at the **foundation / early prototype** stage. The current codebase is intentionally close to upstream PhotoCraft while we separate product identity, preserve compatibility, and build the first AI-native workflow layer.

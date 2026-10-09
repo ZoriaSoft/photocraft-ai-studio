@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 680" width="1200" role="img">
+  <title>PhotoCraft AI Studio — flow</title>
+  <desc>A natural-language prompt becomes a reviewed, validated plan of six deterministic edit steps, runs as one undoable transaction, and produces an editable layered document.</desc>
+  <style>
+    .t1 { font: 600 26px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #e6edf3; }
+    .t2 { font: 400 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #9aa7b4; }
+    .ct { font: 600 15px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #e6edf3; }
+    .cs { font: 400 11px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #5b6672; letter-spacing: 1.5px; }
+    .cd { font: 400 13px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #9aa7b4; }
+    .cdw { font: 400 13px ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Helvetica Neue", sans-serif; fill: #e6edf3; }
+    .mono { font: 500 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #9aa7b4; }
+    .card { fill: #161b22; stroke: #232a33; }
+    .wire { stroke: #3a4450; stroke-width: 2; fill: none; }
+    .flow { stroke: #4c9aff; stroke-width: 2; fill: none; stroke-dasharray: 3 9; animation: dashmove 1.8s linear infinite; }
+    @keyframes dashmove { to { stroke-dashoffset: -24; } }
+    .stage { opacity: 0; animation: reveal .5s cubic-bezier(0.2, 0, 0, 1) both; }
+    @keyframes reveal { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+    .s1 { animation-delay: .1s; } .s2 { animation-delay: .25s; } .s3 { animation-delay: .4s; }
+    .s4 { animation-delay: .55s; } .s5 { animation-delay: .7s; } .s6 { animation-delay: .9s; }
+    /* plan steps: green tick replays one-by-one each loop */
+    .tick { }
+    .tk1 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; }
+    .tk2 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 1.44s infinite; }
+    .tk3 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 1.68s infinite; }
+    .tk4 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 1.92s infinite; }
+    .tk5 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 2.16s infinite; }
+    .tk6 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 2.4s infinite; }
+    @keyframes tick1 {
+      0%, 40%   { opacity: 1; }
+      45%       { opacity: 0; }
+      55%, 100% { opacity: 1; }
+    }
+    /* layer stack assembles after the ticks */
+    .lyr { }
+    .l1 { animation: lyr 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; }
+    .l2 { animation: lyr 10s cubic-bezier(0.2, 0, 0, 1) 1.32s infinite; }
+    .l3 { animation: lyr 10s cubic-bezier(0.2, 0, 0, 1) 1.44s infinite; }
+    @keyframes lyr {
+      0%, 62%  { opacity: 1; transform: translateY(0); }
+      68%      { opacity: 0; transform: translateY(6px); }
+      78%, 100%{ opacity: 1; transform: translateY(0); }
+    }
+    /* rejected chip falls away each loop */
+    .reject { animation: drop 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; opacity: .35; }
+    @keyframes drop {
+      0%, 44%   { transform: translateY(0) rotate(0deg); opacity: 0; }
+      50%       { opacity: .9; }
+      62%       { transform: translateY(46px) rotate(8deg); opacity: .3; }
+      78%, 100% { transform: translateY(46px) rotate(8deg); opacity: .25; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+  </style>
+
+  <rect x="8" y="8" width="1184" height="664" rx="20" fill="#0e1116" stroke="#232a33"/>
+
+  <text class="t1" x="48" y="56">PhotoCraft AI Studio</text>
+  <text class="t2" x="48" y="82">Natural language in. Editable layers out.</text>
+
+  <!-- 1. prompt -->
+  <g class="stage s1">
+    <rect x="48" y="190" width="210" height="110" rx="14" fill="#1c232c" stroke="#4c9aff" stroke-opacity="0.55"/>
+    <path d="M 96 300 L 108 300 L 96 316 Z" fill="#1c232c" stroke="#4c9aff" stroke-opacity="0.55"/>
+    <text class="cs" x="153" y="216" text-anchor="middle">PROMPT</text>
+    <text class="cd" x="153" y="242" text-anchor="middle">"Prepare this product</text>
+    <text class="cd" x="153" y="260" text-anchor="middle">photo for an online</text>
+    <text class="cd" x="153" y="278" text-anchor="middle">store"</text>
+    <path class="wire" d="M 258 245 L 300 245"/>
+    <path class="flow" d="M 258 245 L 300 245"/>
+  </g>
+
+  <!-- 2. planner -->
+  <g class="stage s2">
+    <rect class="card" x="300" y="175" width="170" height="140" rx="12"/>
+    <text class="ct" x="385" y="207" text-anchor="middle">PLANNER</text>
+    <text class="cd" x="385" y="231" text-anchor="middle">local planner</text>
+    <text class="cd" x="385" y="250" text-anchor="middle">optional model</text>
+    <rect x="308" y="270" width="154" height="30" rx="15" fill="#1c232c" stroke="#232a33"/>
+    <text class="cd" x="385" y="290" text-anchor="middle" font-size="12">pixels stay on-device</text>
+    <path class="wire" d="M 470 245 L 512 245"/>
+    <path class="flow" d="M 470 245 L 512 245"/>
+  </g>
+
+  <!-- 3. validator -->
+  <g class="stage s3">
+    <rect class="card" x="512" y="175" width="180" height="140" rx="12"/>
+    <text class="ct" x="602" y="207" text-anchor="middle">VALIDATOR</text>
+    <text class="cd" x="602" y="231" text-anchor="middle">reviewed allowlist</text>
+    <text class="cd" x="602" y="250" text-anchor="middle">parameter checks</text>
+    <text class="cd" x="602" y="288" text-anchor="middle" fill="#5b6672" font-size="12">unknown cmd rejected</text>
+    <path class="wire" d="M 692 245 L 734 245"/>
+    <path class="flow" d="M 692 245 L 734 245"/>
+  </g>
+  <g class="reject">
+    <rect x="576" y="330" width="150" height="30" rx="8" fill="#161b22" stroke="#f85149" stroke-opacity="0.7"/>
+    <text class="cd" x="651" y="350" text-anchor="middle" fill="#f85149" font-size="12">unknown command ✕</text>
+  </g>
+
+  <!-- 4. plan review -->
+  <g class="stage s4">
+    <rect class="card" x="734" y="120" width="230" height="300" rx="12"/>
+    <text class="ct" x="849" y="152" text-anchor="middle">PLAN REVIEW</text>
+    <g font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', sans-serif">
+      <circle class="tick tk1" cx="764" cy="180" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="185">Remove background (mask)</text>
+      <circle class="tick tk2" cx="764" cy="216" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="221">Refine mask edges</text>
+      <circle class="tick tk3" cx="764" cy="252" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="257">Fit subject to canvas</text>
+      <circle class="tick tk4" cx="764" cy="288" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="293">Add background fill</text>
+      <circle class="tick tk5" cx="764" cy="324" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="329">Soft shadow</text>
+      <circle class="tick tk6" cx="764" cy="360" r="8" fill="#3fb950"/>
+      <text class="cdw" x="782" y="365">Tonal adjustment</text>
+    </g>
+    <rect x="750" y="384" width="92" height="26" rx="13" fill="#1c232c" stroke="#3fb950" stroke-opacity="0.6"/>
+    <text class="cd" x="796" y="401" text-anchor="middle" fill="#3fb950" font-size="11">EDITABLE</text>
+    <rect x="850" y="384" width="102" height="26" rx="13" fill="#1c232c" stroke="#4c9aff" stroke-opacity="0.6"/>
+    <text class="cd" x="901" y="401" text-anchor="middle" fill="#4c9aff" font-size="11">ONE UNDO</text>
+    <text class="cd" x="849" y="438" text-anchor="middle" fill="#5b6672" font-size="12">rollback on failure</text>
+    <path class="wire" d="M 964 245 L 1006 245"/>
+    <path class="flow" d="M 964 245 L 1006 245"/>
+  </g>
+
+  <!-- 5. editable document -->
+  <g class="stage s5">
+    <rect x="1006" y="130" width="150" height="260" rx="12" fill="#161b22" stroke="#4c9aff" stroke-opacity="0.55"/>
+    <text class="ct" x="1081" y="162" text-anchor="middle">DOCUMENT</text>
+    <g class="lyr l1"><rect x="1022" y="180" width="118" height="44" rx="7" fill="#1c232c" stroke="#3a4450"/><text class="cd" x="1081" y="207" text-anchor="middle">Product + mask</text></g>
+    <g class="lyr l2"><rect x="1022" y="232" width="118" height="44" rx="7" fill="#1c232c" stroke="#3a4450"/><text class="cd" x="1081" y="252" text-anchor="middle">Drop shadow</text><text class="cd" x="1081" y="268" text-anchor="middle" font-size="11" fill="#5b6672">live effect</text></g>
+    <g class="lyr l3"><rect x="1022" y="284" width="118" height="44" rx="7" fill="#1c232c" stroke="#3a4450"/><text class="cd" x="1081" y="311" text-anchor="middle">Background fill</text></g>
+    <text class="cd" x="1081" y="352" text-anchor="middle" fill="#5b6672" font-size="11">every layer editable</text>
+  </g>
+
+  <!-- bottom row: workflow reuse -->
+  <g class="stage s6">
+    <rect x="48" y="500" width="1104" height="60" rx="12" fill="#161b22" stroke="#232a33"/>
+    <rect x="76" y="516" width="170" height="30" rx="15" fill="#1c232c" stroke="#232a33"/>
+    <text class="cd" x="161" y="536" text-anchor="middle">Save as workflow</text>
+    <text class="cd" x="258" y="536">→</text>
+    <rect x="272" y="516" width="160" height="30" rx="15" fill="#1c232c" stroke="#232a33"/>
+    <text class="cd" x="352" y="536" text-anchor="middle">Batch a folder</text>
+    <text class="cd" x="444" y="536">→</text>
+    <rect x="458" y="516" width="330" height="30" rx="15" fill="#1c232c" stroke="#232a33"/>
+    <text class="mono" x="623" y="536" text-anchor="middle">photo-ai.png copies · sources untouched</text>
+    <text class="cd" x="1152" y="536" text-anchor="end" fill="#5b6672">validated plan → deterministic steps</text>
+  </g>
+</svg>
