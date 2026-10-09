@@ -15,8 +15,8 @@
     @keyframes dashmove { to { stroke-dashoffset: -24; } }
     .stage { opacity: 0; animation: reveal .5s cubic-bezier(0.2, 0, 0, 1) both; }
     @keyframes reveal { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
-    .s1 { animation-delay: .1s; } .s2 { animation-delay: .25s; } .s3 { animation-delay: .4s; }
-    .s4 { animation-delay: .55s; } .s5 { animation-delay: .7s; } .s6 { animation-delay: .9s; }
+    .s1 { animation-delay: .05s; } .s2 { animation-delay: .15s; } .s3 { animation-delay: .25s; }
+    .s4 { animation-delay: .35s; } .s5 { animation-delay: .45s; } .s6 { animation-delay: .55s; }
     /* plan steps: green tick replays one-by-one each loop */
     .tick { }
     .tk1 { animation: tick1 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; }
@@ -41,12 +41,12 @@
       78%, 100%{ opacity: 1; transform: translateY(0); }
     }
     /* rejected chip falls away each loop */
-    .reject { animation: drop 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; opacity: .35; }
+    .reject { animation: drop 10s cubic-bezier(0.2, 0, 0, 1) 1.2s infinite; opacity: .62; }
     @keyframes drop {
       0%, 44%   { transform: translateY(0) rotate(0deg); opacity: 0; }
-      50%       { opacity: .9; }
-      62%       { transform: translateY(46px) rotate(8deg); opacity: .3; }
-      78%, 100% { transform: translateY(46px) rotate(8deg); opacity: .25; }
+      50%       { opacity: .95; }
+      62%       { transform: translateY(46px) rotate(8deg); opacity: .7; }
+      78%, 100% { transform: translateY(46px) rotate(8deg); opacity: .62; }
     }
     @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
   </style>
@@ -97,7 +97,7 @@
 
   <!-- 4. plan review -->
   <g class="stage s4">
-    <rect class="card" x="734" y="120" width="230" height="300" rx="12"/>
+    <rect class="card" x="734" y="120" width="250" height="300" rx="12"/>
     <text class="ct" x="849" y="152" text-anchor="middle">PLAN REVIEW</text>
     <g font-size="13" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', sans-serif">
       <circle class="tick tk1" cx="764" cy="180" r="8" fill="#3fb950"/>
@@ -118,8 +118,8 @@
     <rect x="850" y="384" width="102" height="26" rx="13" fill="#1c232c" stroke="#4c9aff" stroke-opacity="0.6"/>
     <text class="cd" x="901" y="401" text-anchor="middle" fill="#4c9aff" font-size="11">ONE UNDO</text>
     <text class="cd" x="849" y="438" text-anchor="middle" fill="#5b6672" font-size="12">rollback on failure</text>
-    <path class="wire" d="M 964 245 L 1006 245"/>
-    <path class="flow" d="M 964 245 L 1006 245"/>
+    <path class="wire" d="M 984 245 L 1006 245"/>
+    <path class="flow" d="M 984 245 L 1006 245"/>
   </g>
 
   <!-- 5. editable document -->
@@ -143,6 +143,6 @@
     <text class="cd" x="444" y="536">→</text>
     <rect x="458" y="516" width="330" height="30" rx="15" fill="#1c232c" stroke="#232a33"/>
     <text class="mono" x="623" y="536" text-anchor="middle">photo-ai.png copies · sources untouched</text>
-    <text class="cd" x="1152" y="536" text-anchor="end" fill="#5b6672">validated plan → deterministic steps</text>
+    <text class="cd" x="1136" y="536" text-anchor="end" fill="#5b6672">validated plan → deterministic steps</text>
   </g>
 </svg>
