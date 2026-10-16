@@ -694,6 +694,10 @@ impl Default for RawDefaults {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Integrations {
+    /// Use the optional connected model planner when the desktop service has an API key.
+    pub ai_model_planner: bool,
+    /// Non-secret model id requested by AI Studio. `PHOTOCRAFT_AI_MODEL` can override this.
+    pub ai_model: String,
     /// Allow agents to drive the app over the loopback control channel / MCP bridge.
     pub allow_agent_control: bool,
     /// Default control port (0 = only when `--control` is given).
@@ -702,7 +706,7 @@ pub struct Integrations {
 
 impl Default for Integrations {
     fn default() -> Self {
-        Self { allow_agent_control: true, control_port: 0 }
+        Self { ai_model_planner: true, ai_model: "gpt-5.5".into(), allow_agent_control: true, control_port: 0 }
     }
 }
 
@@ -787,7 +791,7 @@ pub const SECTIONS: [(&str, &str); 18] = [
     ("type", "Type"),
     ("enhancedControls", "Enhanced Controls"),
     ("rawDefaults", "Camera Raw Defaults"),
-    ("integrations", "Integrations"),
+    ("integrations", "AI Integrations"),
 ];
 
 /// Preferences that nothing reads yet, so Edit › Preferences doesn't show them: a control that
@@ -1016,6 +1020,15 @@ fn check_value(path: &str, v: &Value) -> std::result::Result<(), String> {
         let ok = v.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 16 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
         if !ok {
             return Err("`interface.language` must be `auto` or a language code such as `en` or `ja`".into());
+        }
+    }
+    if path == "integrations.aiModel" {
+        let ok = v.as_str().is_some_and(|s| {
+            let s = s.trim();
+            !s.is_empty() && s.len() <= 128 && s.is_ascii() && s.chars().all(|c| !c.is_ascii_control() && !c.is_ascii_whitespace())
+        });
+        if !ok {
+            return Err("`integrations.aiModel` must be a non-empty model id up to 128 ASCII characters without spaces".into());
         }
     }
     if let Some((lo, hi)) = range(path) {
@@ -1577,7 +1590,7 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.type", "Type…"),
         section!("edit.preferences.enhancedControls", "Enhanced Controls…"),
         section!("edit.preferences.rawDefaults", "Camera Raw…"),
-        section!("edit.preferences.integrations", "Integrations…"),
+        section!("edit.preferences.integrations", "AI Integrations…"),
         spec!(
             "edit.keyboardShortcuts",
             "Keyboard Shortcuts…",

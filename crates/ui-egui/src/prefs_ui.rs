@@ -740,6 +740,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     match f.get("__prefsui").and_then(Value::as_str).unwrap_or("") {
         "prefs" => {
             f.insert("__gpuInfo".into(), json!(app.perf.gpu_info.lines()));
+            f.insert("__aiPlannerAvailable".into(), json!(app.services.ai_plan.is_some()));
             prefs_body(ui, f);
         }
         "shortcuts" => shortcuts_body(app, ui, f),
@@ -762,7 +763,13 @@ fn humanize(key: &str) -> String {
             s.push(ch);
         }
     }
-    s.replace("Psd", "PSD").replace("Gpu", "GPU").replace("Ui ", "UI ").replace("Mb", "(MB)").replace("Exif", "EXIF").replace("Hud", "HUD")
+    s.replace("Psd", "PSD")
+        .replace("Gpu", "GPU")
+        .replace("Ui ", "UI ")
+        .replace("Ai ", "AI ")
+        .replace("Mb", "(MB)")
+        .replace("Exif", "EXIF")
+        .replace("Hud", "HUD")
 }
 
 fn choice_label(v: &str) -> String {
@@ -844,6 +851,8 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     section_fields(ui, &section, obj, &order, lang);
                     if section == "performance" {
                         gpu_status_rows(ui, f.get("__gpuInfo"), obj);
+                    } else if section == "integrations" {
+                        ai_integration_status_rows(ui, f.get("__aiPlannerAvailable").and_then(Value::as_bool).unwrap_or(false), obj);
                     }
                     ui.add_space(8.0);
                 }
@@ -858,6 +867,34 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     });
     f.insert("section".into(), json!(section));
     f.insert("values".into(), values);
+}
+
+/// Preferences › AI Integrations: connection state and secret-handling guidance. API keys and
+/// provider endpoints deliberately never enter the preferences JSON.
+fn ai_integration_status_rows(ui: &mut egui::Ui, planner_available: bool, obj: &Map<String, Value>) {
+    let t = Tokens::get(ui.ctx());
+    let enabled = obj.get("aiModelPlanner").and_then(Value::as_bool).unwrap_or(true);
+    let model = obj.get("aiModel").and_then(Value::as_str).unwrap_or("gpt-5.5");
+    ui.add_space(10.0);
+    ui.label(RichText::new("Model planner status").font(crate::theme::semibold(12.5)).color(t.text));
+    let status = if !enabled {
+        "Disabled in Preferences · deterministic local planner only"
+    } else if planner_available {
+        "OPENAI_API_KEY detected · connected model planner available"
+    } else {
+        "OPENAI_API_KEY not detected · deterministic local planner only"
+    };
+    ui.label(RichText::new(status).color(t.text_dim));
+    ui.label(RichText::new(format!("Requested model: {model}")).color(t.text_dim));
+    ui.add_space(4.0);
+    ui.label(RichText::new("API keys are read only from OPENAI_API_KEY and are never saved in Preferences.").size(10.5).color(t.text_faint));
+    ui.label(
+        RichText::new(
+            "PHOTOCRAFT_AI_MODEL can override the model above; PHOTOCRAFT_AI_ENDPOINT remains environment-only. Changes here apply to the next AI request.",
+        )
+        .size(10.5)
+        .color(t.text_faint),
+    );
 }
 
 /// Preferences › Performance: what the app renders with now, and a reset of the GPU backend
@@ -1642,9 +1679,15 @@ mod tests {
         assert!(has_visible_fields(&values, "general"));
         assert!(has_visible_fields(&values, "fileHandling"));
         // Every setting of these sections is still unimplemented.
-        for section in ["type", "enhancedControls", "rawDefaults", "integrations", "scratchDisks"] {
+        for section in ["type", "enhancedControls", "rawDefaults", "scratchDisks"] {
             assert!(!has_visible_fields(&values, section), "{section}");
         }
+        // AI Studio makes the Integrations section real while legacy agent-control fields remain hidden.
+        assert!(has_visible_fields(&values, "integrations"));
+        assert!(!prefs::is_hidden("integrations.aiModelPlanner"));
+        assert!(!prefs::is_hidden("integrations.aiModel"));
+        assert!(prefs::is_hidden("integrations.allowAgentControl"));
+        assert!(prefs::is_hidden("integrations.controlPort"));
         assert!(prefs::is_hidden("rawDefaults.applyAutoTone"));
         assert!(!prefs::is_hidden("general.autoShowHomeScreen"));
         assert!(!prefs::is_hidden("interface.uiScale"));

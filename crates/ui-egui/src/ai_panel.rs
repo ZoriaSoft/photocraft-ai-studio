@@ -246,8 +246,15 @@ const MAX_PENDING_NOTE_CHARS: usize = 500;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AiPlannerRequest {
     pub prompt: String,
+    /// Non-secret model id selected in Preferences. Native services may apply an environment override.
+    #[serde(default = "default_ai_model")]
+    pub model: String,
     /// Small, non-pixel document summary. Image data is never sent by this planning layer.
     pub context: Value,
+}
+
+fn default_ai_model() -> String {
+    "gpt-5.5".into()
 }
 
 /// Commands that an AI-generated plan may execute without adding a new review rule.
@@ -905,22 +912,26 @@ fn planner_request(app: &PhotocraftApp, prompt: &str) -> AiPlannerRequest {
             })
         },
     );
-    AiPlannerRequest { prompt: prompt.trim().to_string(), context }
+    AiPlannerRequest { prompt: prompt.trim().to_string(), model: app.session.prefs().integrations.ai_model.clone(), context }
 }
 
 fn start_plan(app: &mut PhotocraftApp, prompt: String) {
     remember_prompt(app, &prompt);
+    let model_enabled = app.session.prefs().integrations.ai_model_planner;
     let request = planner_request(app, &prompt);
-    if let Some(service) = app.services.ai_plan.as_ref() {
-        app.ai_plan_rx = Some(service(request));
-        app.ai_plan_prompt = Some(prompt);
-        app.ui.ai.plan.clear();
-        app.ui.ai.plan_title = "Planning…".into();
-        app.ui.ai.status = "Connected model is building a safe editor plan…".into();
-        app.ui.ai.status_error = false;
-    } else {
-        apply_plan(app, prompt.clone(), plan(&prompt), "local planner");
+    if model_enabled {
+        if let Some(service) = app.services.ai_plan.as_ref() {
+            app.ai_plan_rx = Some(service(request));
+            app.ai_plan_prompt = Some(prompt);
+            app.ui.ai.plan.clear();
+            app.ui.ai.plan_title = "Planning…".into();
+            app.ui.ai.status = "Connected model is building a safe editor plan…".into();
+            app.ui.ai.status_error = false;
+            return;
+        }
     }
+    let source = if model_enabled { "local planner · no API key" } else { "local planner · model disabled" };
+    apply_plan(app, prompt.clone(), plan(&prompt), source);
 }
 
 fn poll_model_plan(app: &mut PhotocraftApp, ctx: &egui::Context) {
@@ -1089,10 +1100,13 @@ fn hero(app: &PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
                 crate::icons::paint(ui, r, "sparkles", 16.0, Color32::WHITE);
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Creative Copilot").font(theme::semibold(14.0)).color(t.text));
-                    let detail = if app.services.ai_plan.is_some() {
-                        "Connected model planner · commands validated locally"
+                    let integrations = &app.session.prefs().integrations;
+                    let detail = if !integrations.ai_model_planner {
+                        "Local command planner · model planner disabled in Preferences".to_string()
+                    } else if app.services.ai_plan.is_some() {
+                        format!("Connected model planner · {} · commands validated locally", integrations.ai_model)
                     } else {
-                        "Local command planner · no upload"
+                        "Local command planner · OPENAI_API_KEY not configured".to_string()
                     };
                     ui.label(RichText::new(detail).size(10.5).color(t.text_dim));
                 });
@@ -1992,7 +2006,8 @@ mod tests {
     #[test]
     fn connected_model_plan_can_cross_the_boundary_when_safe() {
         let services = crate::Services {
-            ai_plan: Some(Box::new(|_| {
+            ai_plan: Some(Box::new(|request| {
+                assert_eq!(request.model, "gpt-5.6");
                 let (tx, rx) = std::sync::mpsc::channel();
                 let _ = tx.send(Ok(PlannedRequest {
                     title: "Polish".into(),
@@ -2003,11 +2018,23 @@ mod tests {
             ..Default::default()
         };
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.run("prefs.set", json!({"path": "integrations.aiModel", "value": "gpt-5.6"})).unwrap();
         start_plan(&mut app, "polish this".into());
         poll_model_plan(&mut app, &egui::Context::default());
         assert_eq!(app.ui.ai.plan_title, "Polish");
         assert!(!app.ui.ai.status_error);
         assert!(app.ui.ai.status.contains("connected model"));
+    }
+
+    #[test]
+    fn model_planner_preference_can_force_local_planning() {
+        let services = crate::Services { ai_plan: Some(Box::new(|_| panic!("disabled model planner must not be called"))), ..Default::default() };
+        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+        app.run("prefs.set", json!({"path": "integrations.aiModelPlanner", "value": false})).unwrap();
+        start_plan(&mut app, "Make it brighter".into());
+        assert!(!app.ui.ai.plan.is_empty());
+        assert!(app.ui.ai.status.contains("model disabled"));
+        assert!(app.ai_plan_rx.is_none());
     }
 
     #[test]

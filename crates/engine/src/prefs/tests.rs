@@ -134,6 +134,20 @@ fn shortcuts_normalise_and_detect_conflicts() {
 }
 
 #[test]
+fn ai_model_preferences_default_and_validate_safely() {
+    let mut p = Preferences::default();
+    assert!(p.integrations.ai_model_planner);
+    assert_eq!(p.integrations.ai_model, "gpt-5.5");
+    p.set("integrations.aiModel", json!("gpt-5.6")).unwrap();
+    p.set("integrations.aiModelPlanner", json!(false)).unwrap();
+    assert_eq!(p.integrations.ai_model, "gpt-5.6");
+    assert!(!p.integrations.ai_model_planner);
+    for bad in [json!(""), json!("model with spaces"), json!("x".repeat(129)), json!(7)] {
+        assert!(p.set("integrations.aiModel", bad).is_err());
+    }
+}
+
+#[test]
 fn keyboard_shortcuts_reassign_and_reset() {
     let mut s = session();
     let undo = crate::commands::find("edit.undo").unwrap().shortcut;

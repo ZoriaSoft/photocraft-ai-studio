@@ -162,17 +162,20 @@ fn run_ai_batch(request: photocraft_ui_egui::ai_panel::AiBatchRequest) -> Result
     Ok(result)
 }
 
-/// Model-backed planning is opt-in: no key means the UI stays entirely local. Secrets are read
-/// from the process environment and are never copied into PhotoCraft preferences or UI state.
+/// Model-backed planning is opt-in: no key means the UI stays entirely local. The API key and
+/// provider endpoint stay environment-only and are never copied into PhotoCraft preferences or UI
+/// state. The non-secret model id comes from Preferences unless PHOTOCRAFT_AI_MODEL overrides it.
 fn ai_planner() -> Option<AiPlanFn> {
     let api_key = std::env::var("OPENAI_API_KEY").ok().filter(|key| !key.trim().is_empty())?;
-    let model = std::env::var("PHOTOCRAFT_AI_MODEL").unwrap_or_else(|_| "gpt-5.5".into());
+    let model_override = std::env::var("PHOTOCRAFT_AI_MODEL").ok().filter(|model| !model.trim().is_empty());
     let endpoint = std::env::var("PHOTOCRAFT_AI_ENDPOINT").unwrap_or_else(|_| "https://api.openai.com/v1/responses".into());
     let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(45)).build().ok()?;
     Some(Box::new(move |request| {
         let (tx, rx) = std::sync::mpsc::channel();
-        let (client, api_key, model, endpoint) = (client.clone(), api_key.clone(), model.clone(), endpoint.clone());
+        let (client, api_key, model_override, endpoint) = (client.clone(), api_key.clone(), model_override.clone(), endpoint.clone());
         std::thread::spawn(move || {
+            let requested = request.model.trim();
+            let model = model_override.unwrap_or_else(|| if requested.is_empty() { "gpt-5.5".into() } else { requested.to_string() });
             let result = openai_plan(&client, &endpoint, &api_key, &model, request);
             let _ = tx.send(result);
         });
