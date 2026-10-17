@@ -18,6 +18,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
 APP_ID=ai.storyteller.photocraft
+# Pinned appimagetool release (never use the moving `continuous` release: the binary below is
+# executed, so its SHA-256 is pinned here and verified after download; a mismatch aborts).
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256_X86_64="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+APPIMAGETOOL_SHA256_AARCH64="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
@@ -105,10 +110,20 @@ if has appimage; then
   TOOL="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
   if [ -z "$TOOL" ]; then
     TOOL="$CARGO_TARGET_DIR/appimagetool-$ARCH.AppImage"
+    case "$ARCH" in
+      x86_64) APPIMAGETOOL_SHA256="$APPIMAGETOOL_SHA256_X86_64" ;;
+      aarch64) APPIMAGETOOL_SHA256="$APPIMAGETOOL_SHA256_AARCH64" ;;
+      *) echo "error: no pinned appimagetool SHA-256 for architecture $ARCH" >&2; exit 1 ;;
+    esac
     if [ ! -x "$TOOL" ]; then
-      curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
-      chmod +x "$TOOL"
+      curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
     fi
+    if ! echo "$APPIMAGETOOL_SHA256  $TOOL" | sha256sum -c -; then
+      echo "error: appimagetool SHA-256 mismatch for $TOOL (expected $APPIMAGETOOL_SHA256 for version $APPIMAGETOOL_VERSION)" >&2
+      rm -f "$TOOL"
+      exit 1
+    fi
+    chmod +x "$TOOL"
   fi
   # Absolute, because appimagetool runs in $DIST below (CARGO_TARGET_DIR or APPIMAGETOOL may be
   # relative, e.g. target/agent-<name>).
@@ -120,17 +135,27 @@ if has appimage; then
   # Update information (#349): AppImageUpdate, AppImageLauncher and the like read it from the
   # file and fetch only the blocks that changed in a newer release, through the .zsync published
   # next to each AppImage on GitHub Releases. `latest` is the newest published release that is
-  # not a pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
-  REPO="${GITHUB_REPOSITORY:-storytold/photocraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|photocraft-*-linux-$ARCH.AppImage.zsync"
+  # not a pre-release. There is deliberately no default repository: a fork must never point its
+  # packages at upstream's releases. Set GITHUB_REPOSITORY (owner/repo, set automatically by
+  # GitHub Actions) to embed update information; without it the AppImage is built without it.
+  UPDATE_ARGS=()
+  UPDATE_INFO=""
+  if [ -n "${GITHUB_REPOSITORY:-}" ] && [ "${GITHUB_REPOSITORY#*/}" != "$GITHUB_REPOSITORY" ]; then
+    REPO="$GITHUB_REPOSITORY"
+    UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|photocraft-*-linux-$ARCH.AppImage.zsync"
+    UPDATE_ARGS=(-u "$UPDATE_INFO")
+    echo "update-info: $UPDATE_INFO"
+  else
+    warn "GITHUB_REPOSITORY is not set to owner/repo, so no AppImage update information will be embedded; set it to this fork's repository (e.g. ZoriaSoft/photocraft-ai-studio) to enable delta updates"
+  fi
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
-  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
+  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "${UPDATE_ARGS[@]}" "$APPDIR" "$OUT")
   echo "wrote $OUT"
   if [ -s "$OUT.zsync" ]; then
     echo "wrote $OUT.zsync"
-  else
+  elif [ -n "$UPDATE_INFO" ]; then
     warn "zsyncmake not found, so $OUT.zsync was not written; AppImage delta updates need it"
   fi
 fi

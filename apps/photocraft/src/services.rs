@@ -229,13 +229,20 @@ fn response_output_text(value: &serde_json::Value) -> Option<&str> {
 
 fn parse_plan_json(text: &str) -> Result<photocraft_ui_egui::ai_panel::PlannedRequest, String> {
     let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("AI plan did not contain a JSON object.".to_string());
+    }
     if let Ok(plan) = serde_json::from_str(trimmed) {
         return Ok(plan);
     }
     // Be tolerant of a provider wrapping otherwise-valid JSON in markdown despite the instruction.
     let start = trimmed.find('{').ok_or_else(|| "AI plan did not contain a JSON object.".to_string())?;
     let end = trimmed.rfind('}').ok_or_else(|| "AI plan JSON was incomplete.".to_string())?;
-    serde_json::from_str(&trimmed[start..=end]).map_err(|error| format!("AI plan JSON was invalid: {error}"))
+    if start >= end {
+        return Err("AI plan JSON was incomplete.".to_string());
+    }
+    let slice = trimmed.get(start..=end).ok_or_else(|| "AI plan JSON was incomplete.".to_string())?;
+    serde_json::from_str(slice).map_err(|error| format!("AI plan JSON was invalid: {error}"))
 }
 
 type SharedRecovery = Rc<RefCell<Option<RecoveryStore>>>;
@@ -755,5 +762,35 @@ mod tests {
         std::fs::write(&bin, tga_1x1()).unwrap();
         assert_eq!(image_from_files(&[tga]), Some((1, 1, vec![255, 0, 0, 255])));
         assert!(image_from_files(&[bin]).is_none());
+    }
+
+    #[test]
+    fn plan_json_reversed_braces_return_error_not_panic() {
+        assert!(parse_plan_json("} {").is_err());
+        assert!(parse_plan_json("} no object here {").is_err());
+    }
+
+    #[test]
+    fn plan_json_missing_or_empty_returns_error() {
+        assert!(parse_plan_json("").is_err());
+        assert!(parse_plan_json("  \n\t ").is_err());
+        assert!(parse_plan_json("no json at all").is_err());
+        assert!(parse_plan_json("{").is_err());
+        assert!(parse_plan_json("}").is_err());
+        assert!(parse_plan_json("{\"title\":\"x\"").is_err());
+    }
+
+    #[test]
+    fn plan_json_multibyte_unicode_returns_error_not_panic() {
+        // Reversed braces after multi-byte characters must not slice mid-char or panic.
+        assert!(parse_plan_json("✨é } { ✨").is_err());
+        assert!(parse_plan_json("é✨").is_err());
+    }
+
+    #[test]
+    fn plan_json_multibyte_unicode_wrapped_plan_parses() {
+        let plan = parse_plan_json("Açıklama ✨ {\"title\":\"Plan ✨\",\"steps\":[]} — son").unwrap();
+        assert_eq!(plan.title, "Plan ✨");
+        assert!(plan.steps.is_empty());
     }
 }

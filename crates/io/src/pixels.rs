@@ -35,13 +35,31 @@ fn invert_sample(bytes: &mut [u8], s: SampleType) {
     }
 }
 
+/// Total byte length of an interleaved buffer of `n` pixels, `ch` channels and
+/// `bps` bytes per sample, computed with checked arithmetic. Input-derived
+/// dimensions are hostile: an unchecked `n * ch * bps` can wrap (or panic in
+/// debug builds) and a wrapped length would under-allocate the buffer below.
+pub fn checked_interleaved_len(n: usize, ch: usize, bps: usize) -> Result<usize, String> {
+    n.checked_mul(ch)
+        .and_then(|total| total.checked_mul(bps))
+        .ok_or_else(|| format!("interleaved pixel buffer size overflows usize ({n} pixels x {ch} channels x {bps} bytes per sample)"))
+}
+
 /// Interleaves planes (big-endian samples, `n` pixels each). `None` planes
 /// are filled with `fill[c]` (a native-endian encoded sample). Channels whose
 /// `invert[c]` is set are inverted (PSD stores CMYK as `max - ink`).
-pub fn interleave(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: SampleType, invert: &[bool]) -> Vec<u8> {
+///
+/// Returns an error instead of panicking or wrapping when `n * planes.len() *
+/// s.bytes()` does not fit in a `usize`, or when the buffer would exceed the
+/// maximum allocation size (`isize::MAX`).
+pub fn interleave(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: SampleType, invert: &[bool]) -> Result<Vec<u8>, String> {
     let bps = s.bytes();
     let ch = planes.len();
-    let mut out = vec![0u8; n * ch * bps];
+    let len = checked_interleaved_len(n, ch, bps)?;
+    if len > isize::MAX as usize {
+        return Err(format!("interleaved pixel buffer of {len} bytes exceeds the maximum allocation size"));
+    }
+    let mut out = vec![0u8; len];
     for (c, plane) in planes.iter().enumerate() {
         for i in 0..n {
             let dst = &mut out[(i * ch + c) * bps..(i * ch + c + 1) * bps];
@@ -62,7 +80,7 @@ pub fn interleave(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: Sampl
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Splits interleaved native-endian bytes into big-endian planes.
@@ -201,7 +219,7 @@ mod tests {
             let refs: Vec<Option<&[u8]>> = planes.iter().map(|p| Some(&p[..])).collect();
             let fill = vec![zero_sample(s); 3];
             let inv = [false, true, false];
-            let il = interleave(&refs, &fill, 4, s, &inv);
+            let il = interleave(&refs, &fill, 4, s, &inv).unwrap();
             let back = deinterleave(&il, 3, s, &inv);
             if s == SampleType::F32 {
                 // 1 - (1 - v) may not be exact for floats; only check non-inverted planes.
@@ -215,7 +233,7 @@ mod tests {
 
     #[test]
     fn missing_planes_use_fill() {
-        let il = interleave(&[None, Some(&[5, 6])], &[vec![9], vec![0]], 2, SampleType::U8, &[false, false]);
+        let il = interleave(&[None, Some(&[5, 6])], &[vec![9], vec![0]], 2, SampleType::U8, &[false, false]).unwrap();
         assert_eq!(il, vec![9, 5, 9, 6]);
     }
 
@@ -256,5 +274,24 @@ mod tests {
         let mut f = Vec::new();
         encode_be(2.5, SampleType::F32, &mut f);
         assert_eq!(decode_be(&f, 0, SampleType::F32), 2.5);
+    }
+
+    #[test]
+    fn checked_interleaved_len_uses_checked_mul() {
+        assert_eq!(checked_interleaved_len(4, 3, 2), Ok(24));
+        assert_eq!(checked_interleaved_len(0, 3, 4), Ok(0));
+        // width * height * channels * bytes-per-sample style inputs must error, never wrap.
+        assert!(checked_interleaved_len(usize::MAX, 4, 4).is_err());
+        assert!(checked_interleaved_len(usize::MAX / 2, 4, 1).is_err());
+    }
+
+    #[test]
+    fn interleave_huge_pixel_count_errors_instead_of_allocating() {
+        // Multi-channel overflow of `n * ch * bps`.
+        let err = interleave(&[None, None], &[vec![0], vec![0]], usize::MAX, SampleType::U8, &[false, false]).unwrap_err();
+        assert!(err.contains("overflows"), "{err}");
+        // A single-channel count that fits `usize` but exceeds any real allocation.
+        let err = interleave(&[None], &[vec![0]], usize::MAX, SampleType::U8, &[false]).unwrap_err();
+        assert!(err.contains("maximum allocation"), "{err}");
     }
 }
