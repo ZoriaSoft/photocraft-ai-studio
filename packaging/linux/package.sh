@@ -135,17 +135,27 @@ if has appimage; then
   # Update information (#349): AppImageUpdate, AppImageLauncher and the like read it from the
   # file and fetch only the blocks that changed in a newer release, through the .zsync published
   # next to each AppImage on GitHub Releases. `latest` is the newest published release that is
-  # not a pre-release. A fork's builds point at its own releases through GITHUB_REPOSITORY.
-  REPO="${GITHUB_REPOSITORY:-storytold/photocraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|photocraft-*-linux-$ARCH.AppImage.zsync"
+  # not a pre-release. There is deliberately no default repository: a fork must never point its
+  # packages at upstream's releases. Set GITHUB_REPOSITORY (owner/repo, set automatically by
+  # GitHub Actions) to embed update information; without it the AppImage is built without it.
+  UPDATE_ARGS=()
+  UPDATE_INFO=""
+  if [ -n "${GITHUB_REPOSITORY:-}" ] && [ "${GITHUB_REPOSITORY#*/}" != "$GITHUB_REPOSITORY" ]; then
+    REPO="$GITHUB_REPOSITORY"
+    UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|photocraft-*-linux-$ARCH.AppImage.zsync"
+    UPDATE_ARGS=(-u "$UPDATE_INFO")
+    echo "update-info: $UPDATE_INFO"
+  else
+    warn "GITHUB_REPOSITORY is not set to owner/repo, so no AppImage update information will be embedded; set it to this fork's repository (e.g. ZoriaSoft/photocraft-ai-studio) to enable delta updates"
+  fi
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. With zsyncmake on the host (CI installs the zsync
   # package) appimagetool also writes the .zsync, into its working directory, hence the cd.
-  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream -u "$UPDATE_INFO" "$APPDIR" "$OUT")
+  (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "${UPDATE_ARGS[@]}" "$APPDIR" "$OUT")
   echo "wrote $OUT"
   if [ -s "$OUT.zsync" ]; then
     echo "wrote $OUT.zsync"
-  else
+  elif [ -n "$UPDATE_INFO" ]; then
     warn "zsyncmake not found, so $OUT.zsync was not written; AppImage delta updates need it"
   fi
 fi
