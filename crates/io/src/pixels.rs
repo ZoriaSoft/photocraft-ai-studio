@@ -45,10 +45,14 @@ pub fn checked_interleaved_len(n: usize, ch: usize, bps: usize) -> Result<usize,
         .ok_or_else(|| format!("interleaved pixel buffer size overflows usize ({n} pixels x {ch} channels x {bps} bytes per sample)"))
 }
 
-/// Checked variant of [`interleave`]: returns an error instead of panicking or
-/// wrapping when `n * planes.len() * s.bytes()` does not fit in a `usize`, or
-/// when the buffer would exceed the maximum allocation size (`isize::MAX`).
-pub fn interleave_checked(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: SampleType, invert: &[bool]) -> Result<Vec<u8>, String> {
+/// Interleaves planes (big-endian samples, `n` pixels each). `None` planes
+/// are filled with `fill[c]` (a native-endian encoded sample). Channels whose
+/// `invert[c]` is set are inverted (PSD stores CMYK as `max - ink`).
+///
+/// Returns an error instead of panicking or wrapping when `n * planes.len() *
+/// s.bytes()` does not fit in a `usize`, or when the buffer would exceed the
+/// maximum allocation size (`isize::MAX`).
+pub fn interleave(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: SampleType, invert: &[bool]) -> Result<Vec<u8>, String> {
     let bps = s.bytes();
     let ch = planes.len();
     let len = checked_interleaved_len(n, ch, bps)?;
@@ -77,17 +81,6 @@ pub fn interleave_checked(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, 
         }
     }
     Ok(out)
-}
-
-/// Interleaves planes (big-endian samples, `n` pixels each). `None` planes
-/// are filled with `fill[c]` (a native-endian encoded sample). Channels whose
-/// `invert[c]` is set are inverted (PSD stores CMYK as `max - ink`).
-///
-/// Returns an empty buffer when the interleaved size overflows `usize`
-/// (see [`checked_interleaved_len`]); callers that can report the failure
-/// should use [`interleave_checked`] instead.
-pub fn interleave(planes: &[Option<&[u8]>], fill: &[Vec<u8>], n: usize, s: SampleType, invert: &[bool]) -> Vec<u8> {
-    interleave_checked(planes, fill, n, s, invert).unwrap_or_default()
 }
 
 /// Splits interleaved native-endian bytes into big-endian planes.
@@ -226,7 +219,7 @@ mod tests {
             let refs: Vec<Option<&[u8]>> = planes.iter().map(|p| Some(&p[..])).collect();
             let fill = vec![zero_sample(s); 3];
             let inv = [false, true, false];
-            let il = interleave(&refs, &fill, 4, s, &inv);
+            let il = interleave(&refs, &fill, 4, s, &inv).unwrap();
             let back = deinterleave(&il, 3, s, &inv);
             if s == SampleType::F32 {
                 // 1 - (1 - v) may not be exact for floats; only check non-inverted planes.
@@ -240,7 +233,7 @@ mod tests {
 
     #[test]
     fn missing_planes_use_fill() {
-        let il = interleave(&[None, Some(&[5, 6])], &[vec![9], vec![0]], 2, SampleType::U8, &[false, false]);
+        let il = interleave(&[None, Some(&[5, 6])], &[vec![9], vec![0]], 2, SampleType::U8, &[false, false]).unwrap();
         assert_eq!(il, vec![9, 5, 9, 6]);
     }
 
@@ -295,12 +288,10 @@ mod tests {
     #[test]
     fn interleave_huge_pixel_count_errors_instead_of_allocating() {
         // Multi-channel overflow of `n * ch * bps`.
-        let err = interleave_checked(&[None, None], &[vec![0], vec![0]], usize::MAX, SampleType::U8, &[false, false]).unwrap_err();
+        let err = interleave(&[None, None], &[vec![0], vec![0]], usize::MAX, SampleType::U8, &[false, false]).unwrap_err();
         assert!(err.contains("overflows"), "{err}");
         // A single-channel count that fits `usize` but exceeds any real allocation.
-        let err = interleave_checked(&[None], &[vec![0]], usize::MAX, SampleType::U8, &[false]).unwrap_err();
+        let err = interleave(&[None], &[vec![0]], usize::MAX, SampleType::U8, &[false]).unwrap_err();
         assert!(err.contains("maximum allocation"), "{err}");
-        // The infallible wrapper degrades to an empty buffer rather than panicking.
-        assert!(interleave(&[None], &[vec![0]], usize::MAX, SampleType::U8, &[false]).is_empty());
     }
 }

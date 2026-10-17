@@ -8,12 +8,12 @@ use photocraft_geom::{Rect, Size, TILE_SIZE};
 use photocraft_psd::layer::{CHANNEL_REAL_USER_MASK, CHANNEL_TRANSPARENCY, CHANNEL_USER_MASK};
 use photocraft_psd::resources::ids;
 use photocraft_psd::tagged::BlockData;
-use photocraft_psd::{ColorMode as PsdMode, LayerNode, LayerRecord, PsdFile, TaggedBlock};
+use photocraft_psd::{ColorMode as PsdMode, LayerNode, LayerRecord, PsdError, PsdFile, TaggedBlock};
 use photocraft_raster::Surface;
 
 use crate::adjust_map::{self, ADJUSTMENT_KEYS};
 use crate::blocks;
-use crate::pixels::{interleave, interleave_checked, max_sample, sample_for_depth, zero_sample};
+use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
 pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
@@ -42,48 +42,79 @@ pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
 /// `Layer::psd_blocks`.
 pub(crate) const REGENERATED: [&[u8; 4]; 9] = [b"luni", b"lyid", b"lsct", b"lsdk", b"iOpa", b"lspf", b"lclr", b"lfx2", b"lfxs"];
 
-/// Per-layer budget for interleaved pixel data decoded during one PSD import.
-/// A layer header can claim far more pixels than the canvas holds (or than the
-/// file contains channel data for); without a pre-allocation check a malformed
-/// header would make the importer try to allocate that buffer and die.
-pub(crate) const MAX_LAYER_PIXEL_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// Default per-layer budget for interleaved pixel data decoded during one PSD
+/// import (2 GiB). A layer header can claim far more pixels than the canvas
+/// holds (or than the file contains channel data for); without a pre-allocation
+/// check a malformed header would make the importer try to allocate that buffer
+/// and die.
+pub const MAX_LAYER_PIXEL_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
-/// Total budget for interleaved pixel data across a whole PSD import. Many
-/// individually-plausible layers must not add up to an unbounded allocation.
-pub(crate) const MAX_IMPORT_PIXEL_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// Default total budget for interleaved pixel data across a whole PSD/PSB
+/// import: 16 GiB on 64-bit targets (enough for multi-gigabyte professional
+/// multi-layer 16/32-bit documents) and 2 GiB on 32-bit targets.
+pub const MAX_IMPORT_PIXEL_BYTES: usize = if cfg!(target_pointer_width = "64") { 16 * 1024 * 1024 * 1024 } else { 2 * 1024 * 1024 * 1024 };
 
-/// Maximum layer-group nesting depth imported recursively. Deeper groups are
-/// truncated with a warning instead of recursing until the stack is exhausted.
-pub(crate) const MAX_GROUP_DEPTH: usize = 64;
+/// Default maximum layer-group nesting depth imported recursively.
+pub const MAX_GROUP_DEPTH: usize = 64;
 
-/// Byte size of one layer's interleaved pixels (`width * height * channels *
-/// bytes_per_sample`, all checked), rejected when it exceeds
-/// [`MAX_LAYER_PIXEL_BYTES`].
-fn checked_layer_pixel_bytes(width: usize, height: usize, channels: usize, bytes_per_sample: usize) -> Result<usize, String> {
+/// Configurable safety and allocation limits for PSD/PSB import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PsdImportLimits {
+    /// Maximum interleaved pixel bytes for a single layer or mask.
+    pub max_layer_pixel_bytes: usize,
+    /// Maximum cumulative interleaved pixel bytes across the whole import.
+    pub max_import_pixel_bytes: usize,
+    /// Maximum layer-group nesting depth.
+    pub max_group_depth: usize,
+}
+
+impl Default for PsdImportLimits {
+    fn default() -> Self {
+        Self { max_layer_pixel_bytes: MAX_LAYER_PIXEL_BYTES, max_import_pixel_bytes: MAX_IMPORT_PIXEL_BYTES, max_group_depth: MAX_GROUP_DEPTH }
+    }
+}
+
+impl PsdImportLimits {
+    /// Effectively unlimited (still bounded by `usize` overflow and `isize::MAX` allocation checks).
+    pub fn none() -> Self {
+        Self { max_layer_pixel_bytes: usize::MAX, max_import_pixel_bytes: usize::MAX, max_group_depth: usize::MAX }
+    }
+}
+
+/// Returns `(pixel_count, byte_len)` for one layer's interleaved pixels
+/// (`width * height * channels * bytes_per_sample`, all checked), rejected when
+/// `byte_len` exceeds `max_layer_pixel_bytes`.
+fn checked_layer_pixel_bytes(
+    width: usize,
+    height: usize,
+    channels: usize,
+    bytes_per_sample: usize,
+    max_layer_pixel_bytes: usize,
+) -> Result<(usize, usize), String> {
     let pixels = width.checked_mul(height).ok_or_else(|| format!("layer pixel count overflows usize ({width}x{height})"))?;
     let bytes = crate::pixels::checked_interleaved_len(pixels, channels, bytes_per_sample)?;
-    if bytes > MAX_LAYER_PIXEL_BYTES {
+    if bytes > max_layer_pixel_bytes {
         return Err(format!(
-            "layer pixel data would need {bytes} bytes ({width}x{height}, {channels} channels), exceeding the per-layer limit of {MAX_LAYER_PIXEL_BYTES} bytes"
+            "layer pixel data would need {bytes} bytes ({width}x{height}, {channels} channels), exceeding the per-layer limit of {max_layer_pixel_bytes} bytes"
         ));
     }
-    Ok(bytes)
+    Ok((pixels, bytes))
 }
 
 /// New total after adding `additional` imported pixel bytes to `used`,
-/// rejected when the total exceeds [`MAX_IMPORT_PIXEL_BYTES`].
-fn checked_import_total(used: usize, additional: usize) -> Result<usize, String> {
+/// rejected when the total exceeds `max_import_pixel_bytes`.
+fn checked_import_total(used: usize, additional: usize, max_import_pixel_bytes: usize) -> Result<usize, String> {
     let total = used.checked_add(additional).ok_or_else(|| "total imported pixel size overflows usize".to_string())?;
-    if total > MAX_IMPORT_PIXEL_BYTES {
-        return Err(format!("imported pixel data would total {total} bytes, exceeding the total import limit of {MAX_IMPORT_PIXEL_BYTES} bytes"));
+    if total > max_import_pixel_bytes {
+        return Err(format!("imported pixel data would total {total} bytes, exceeding the total import limit of {max_import_pixel_bytes} bytes"));
     }
     Ok(total)
 }
 
-/// Rejects group nesting deeper than [`MAX_GROUP_DEPTH`].
-fn check_group_depth(depth: usize) -> Result<(), String> {
-    if depth > MAX_GROUP_DEPTH {
-        return Err(format!("layer group nesting depth {depth} exceeds the limit of {MAX_GROUP_DEPTH}"));
+/// Rejects group nesting deeper than `max_group_depth`.
+fn check_group_depth(depth: usize, max_group_depth: usize) -> Result<(), String> {
+    if depth > max_group_depth {
+        return Err(format!("layer group nesting depth {depth} exceeds the limit of {max_group_depth}"));
     }
     Ok(())
 }
@@ -106,8 +137,12 @@ pub(crate) struct Ctx<'a> {
     /// Layer records decoded so far, out of `total` (progress).
     pub done: usize,
     pub total: usize,
-    /// Interleaved pixel bytes charged against [`MAX_IMPORT_PIXEL_BYTES`] so far.
+    /// Configured safety limits for this import.
+    pub limits: PsdImportLimits,
+    /// Interleaved pixel bytes charged against `limits.max_import_pixel_bytes` so far.
     pub pixel_bytes_used: usize,
+    /// First fatal limit or allocation error encountered during import.
+    pub limit_error: Option<String>,
 }
 
 fn doc_mode(m: PsdMode) -> Option<ColorMode> {
@@ -152,11 +187,21 @@ impl Ctx<'_> {
         self.warnings.push(s.into());
     }
 
-    /// Charges `needed` interleaved pixel bytes against the total import
-    /// budget ([`MAX_IMPORT_PIXEL_BYTES`]); the caller reports the error.
-    fn reserve_pixel_bytes(&mut self, needed: usize) -> Result<(), String> {
-        self.pixel_bytes_used = checked_import_total(self.pixel_bytes_used, needed)?;
-        Ok(())
+    fn report_limit_error(&mut self, s: impl Into<String>) {
+        let msg = s.into();
+        if self.limit_error.is_none() {
+            self.limit_error = Some(msg.clone());
+        }
+        self.warnings.push(msg);
+    }
+
+    /// Validates a layer's dimensions against `limits.max_layer_pixel_bytes`,
+    /// charges the resulting byte size against `limits.max_import_pixel_bytes`,
+    /// and returns the validated `pixel_count` (`width * height`).
+    fn reserve_layer_pixels(&mut self, width: usize, height: usize, channels: usize, bytes_per_sample: usize) -> Result<usize, String> {
+        let (pixels, needed) = checked_layer_pixel_bytes(width, height, channels, bytes_per_sample, self.limits.max_layer_pixel_bytes)?;
+        self.pixel_bytes_used = checked_import_total(self.pixel_bytes_used, needed, self.limits.max_import_pixel_bytes)?;
+        Ok(pixels)
     }
 
     fn channel_plane(&mut self, rec: &LayerRecord, id: i16, name: &str) -> Option<Vec<u8>> {
@@ -179,15 +224,10 @@ impl Ctx<'_> {
         let s = self.fmt.sample;
         // Check the claimed size before decoding or allocating anything sized
         // by it: a small canvas can carry a layer header claiming huge pixels.
-        let budget = checked_layer_pixel_bytes(w, h, self.cc + 1, s.bytes()).and_then(|needed| self.reserve_pixel_bytes(needed));
-        if let Err(e) = budget {
-            self.warn(format!("layer \"{name}\": {e}; treated as empty"));
-            return Surface::new(self.fmt);
-        }
-        let pixel_count = match w.checked_mul(h) {
-            Some(n) => n,
-            None => {
-                self.warn(format!("layer \"{name}\": pixel count overflows usize ({w}x{h}); treated as empty"));
+        let pixel_count = match self.reserve_layer_pixels(w, h, self.cc + 1, s.bytes()) {
+            Ok(n) => n,
+            Err(e) => {
+                self.report_limit_error(format!("layer \"{name}\": {e}; treated as empty"));
                 return Surface::new(self.fmt);
             }
         };
@@ -201,10 +241,10 @@ impl Ctx<'_> {
         fill.push(max_sample(s));
         let mut invert = vec![self.cmyk; self.cc];
         invert.push(false);
-        let mut bytes = match interleave_checked(&refs, &fill, pixel_count, s, &invert) {
+        let mut bytes = match interleave(&refs, &fill, pixel_count, s, &invert) {
             Ok(bytes) => bytes,
             Err(e) => {
-                self.warn(format!("layer \"{name}\": {e}; treated as empty"));
+                self.report_limit_error(format!("layer \"{name}\": {e}; treated as empty"));
                 return Surface::new(self.fmt);
             }
         };
@@ -230,18 +270,19 @@ impl Ctx<'_> {
             && let Ok((w, h)) = rect.size()
         {
             let s = self.mask_fmt.sample;
-            let budget = checked_layer_pixel_bytes(w, h, 1, s.bytes()).and_then(|needed| self.reserve_pixel_bytes(needed));
-            match budget {
-                Ok(()) => {
+            match self.reserve_layer_pixels(w, h, 1, s.bytes()) {
+                Ok(pixel_count) => {
                     if let Some(plane) = self.channel_plane(rec, id, name) {
-                        let pixel_count = w.checked_mul(h).unwrap_or(0);
-                        if let Ok(bytes) = interleave_checked(&[Some(&plane)], &[zero_sample(s)], pixel_count, s, &[false]) {
-                            surface.write_interleaved(Rect::new(rect.left, rect.top, rect.right, rect.bottom), &bytes);
-                            surface.prune();
+                        match interleave(&[Some(&plane)], &[zero_sample(s)], pixel_count, s, &[false]) {
+                            Ok(bytes) => {
+                                surface.write_interleaved(Rect::new(rect.left, rect.top, rect.right, rect.bottom), &bytes);
+                                surface.prune();
+                            }
+                            Err(e) => self.report_limit_error(format!("layer \"{name}\": mask {e}; mask treated as empty")),
                         }
                     }
                 }
-                Err(e) => self.warn(format!("layer \"{name}\": mask {e}; mask treated as empty")),
+                Err(e) => self.report_limit_error(format!("layer \"{name}\": mask {e}; mask treated as empty")),
             }
         }
         let params = m.parameters;
@@ -456,8 +497,8 @@ impl Ctx<'_> {
     }
 
     fn build(&mut self, nodes: &[LayerNode], depth: usize) -> Vec<Layer> {
-        if let Err(e) = check_group_depth(depth) {
-            self.warn(format!("{e}; deeper groups were not imported"));
+        if let Err(e) = check_group_depth(depth, self.limits.max_group_depth) {
+            self.report_limit_error(format!("{e}; deeper groups were not imported"));
             return Vec::new();
         }
         let layers = self.file.layers();
@@ -492,8 +533,8 @@ impl Ctx<'_> {
 }
 
 /// Sets `Layer::link_group` from resource 1026's per-record ids (`nodes` and `layers` correspond).
-fn apply_link_groups(nodes: &[LayerNode], layers: &mut [Layer], ids: &[u16], depth: usize) {
-    if depth > MAX_GROUP_DEPTH {
+fn apply_link_groups(nodes: &[LayerNode], layers: &mut [Layer], ids: &[u16], depth: usize, max_group_depth: usize) {
+    if depth > max_group_depth {
         return;
     }
     for (n, l) in nodes.iter().zip(layers.iter_mut()) {
@@ -501,7 +542,7 @@ fn apply_link_groups(nodes: &[LayerNode], layers: &mut [Layer], ids: &[u16], dep
             LayerNode::Layer { index } => *index,
             LayerNode::Group { index, children, .. } => {
                 if let LayerContent::Group(g) = &mut l.content {
-                    apply_link_groups(children, &mut g.children, ids, depth + 1);
+                    apply_link_groups(children, &mut g.children, ids, depth + 1, max_group_depth);
                 }
                 *index
             }
@@ -514,7 +555,7 @@ fn preserved_blocks(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
     rec.blocks.iter().filter(|b| !REGENERATED.contains(&&b.key)).map(|b| (b.key, Arc::new(b.data.clone()))).collect()
 }
 
-fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
+fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Result<Vec<u8>, String> {
     interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
 
@@ -547,6 +588,34 @@ fn parse_guides(data: &[u8], doc: &mut Document) {
     }
 }
 
+/// Converts a parsed PSD into a document, returning an error if any safety or
+/// allocation limit in [`PsdImportLimits::default`] is exceeded.
+pub fn try_psd_to_document(file: &PsdFile) -> Result<(Document, Vec<String>), PsdError> {
+    try_psd_to_document_with(file, &photocraft_raster::Interrupt::NONE)
+        .map(|opt| opt.unwrap_or_else(|| (Document::new("Untitled", Size::new(1, 1), ColorMode::Rgb, SampleType::U8), Vec::new())))
+}
+
+/// [`try_psd_to_document`] for a background open: checks `ctl` per layer record
+/// and reports progress. `Ok(None)` when cancelled.
+pub fn try_psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) -> Result<Option<(Document, Vec<String>)>, PsdError> {
+    try_psd_to_document_with_limits(file, ctl, &PsdImportLimits::default())
+}
+
+/// [`try_psd_to_document_with`] with explicit [`PsdImportLimits`]. Returns
+/// `Err(PsdError::Invalid(_))` instead of silently truncating layers or groups
+/// when a configured limit is exceeded.
+pub fn try_psd_to_document_with_limits(
+    file: &PsdFile,
+    ctl: &photocraft_raster::Interrupt,
+    limits: &PsdImportLimits,
+) -> Result<Option<(Document, Vec<String>)>, PsdError> {
+    match psd_to_document_inner(file, ctl, *limits) {
+        None => Ok(None),
+        Some((_, _, Some(err))) => Err(PsdError::Invalid(err)),
+        Some((doc, warnings, None)) => Ok(Some((doc, warnings))),
+    }
+}
+
 /// Converts a parsed PSD into a document. Never fails: problems become warnings.
 pub fn psd_to_document(file: &PsdFile) -> (Document, Vec<String>) {
     // Never cancelled, so always `Some`; the fallback is unreachable.
@@ -557,6 +626,16 @@ pub fn psd_to_document(file: &PsdFile) -> (Document, Vec<String>) {
 /// [`psd_to_document`] for a background open: checks `ctl` per layer record and reports
 /// progress. `None` when cancelled.
 pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) -> Option<(Document, Vec<String>)> {
+    psd_to_document_with_limits(file, ctl, &PsdImportLimits::default())
+}
+
+/// [`psd_to_document_with`] with explicit [`PsdImportLimits`], recording limit
+/// violations as warnings rather than failing the import.
+pub fn psd_to_document_with_limits(file: &PsdFile, ctl: &photocraft_raster::Interrupt, limits: &PsdImportLimits) -> Option<(Document, Vec<String>)> {
+    psd_to_document_inner(file, ctl, *limits).map(|(doc, warnings, _)| (doc, warnings))
+}
+
+fn psd_to_document_inner(file: &PsdFile, ctl: &photocraft_raster::Interrupt, limits: PsdImportLimits) -> Option<(Document, Vec<String>, Option<String>)> {
     let h = &file.header;
     let mut warnings = Vec::new();
     let mode = doc_mode(h.color_mode).unwrap_or_else(|| {
@@ -638,7 +717,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         ctl: *ctl,
         done: 0,
         total: file.layers().len(),
+        limits,
         pixel_bytes_used: 0,
+        limit_error: None,
     };
     for b in file.global_blocks.iter().filter(|b| matches!(&b.key, b"FEid" | b"FXid")) {
         // Smart-filter caches can be large: a cancelled open stops between blocks.
@@ -682,9 +763,10 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         if let Some(Ok(photocraft_psd::resources::ResourceData::LayerGroupInfo(groups))) =
             file.resources.iter().find(|r| r.id == ids::LAYER_GROUP_INFO).and_then(photocraft_psd::resources::ImageResource::parsed)
         {
-            apply_link_groups(&tree, &mut doc.layers, &groups, 0);
+            apply_link_groups(&tree, &mut doc.layers, &groups, 0, cx.limits.max_group_depth);
         }
         if doc.layers.is_empty()
+            && cx.limit_error.is_none()
             && let Ok(all) = &merged
         {
             // Flattened file: the merged image becomes the background layer.
@@ -696,37 +778,41 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
             fill.push(max_sample(depth));
             let mut inv = vec![cx.cmyk; cc];
             inv.push(false);
-            let mut bytes = interleave(&planes, &fill, n, depth, &inv);
-            if fmt.mode == ColorMode::Lab && depth == SampleType::U16 {
-                crate::pixels::lab16_chroma(&mut bytes, cc + 1, true);
-            }
-            let mut s = Surface::from_interleaved(fmt, canvas, &bytes);
-            if alpha_idx.is_some() {
-                // Undo Photoshop's white matting of the merged image.
-                // A band of tile rows at a time (no full-size float copy of the image).
-                let white = photocraft_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
-                let mut vals = Vec::new();
-                let mut y = canvas.y0;
-                while y < canvas.y1 {
-                    let band = Rect::new(canvas.x0, y, canvas.x1, y.saturating_add(TILE_SIZE).min(canvas.y1));
-                    s.read_region_into(band, &mut vals);
-                    for px in vals.chunks_exact_mut(cc + 1) {
-                        let a = px[cc];
-                        for c in 0..cc {
-                            px[c] = if a <= 0.0 { 0.0 } else { crate::pixels::unmatte(px[c], a, white[c]) };
+            match interleave(&planes, &fill, n, depth, &inv) {
+                Ok(mut bytes) => {
+                    if fmt.mode == ColorMode::Lab && depth == SampleType::U16 {
+                        crate::pixels::lab16_chroma(&mut bytes, cc + 1, true);
+                    }
+                    let mut s = Surface::from_interleaved(fmt, canvas, &bytes);
+                    if alpha_idx.is_some() {
+                        // Undo Photoshop's white matting of the merged image.
+                        // A band of tile rows at a time (no full-size float copy of the image).
+                        let white = photocraft_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
+                        let mut vals = Vec::new();
+                        let mut y = canvas.y0;
+                        while y < canvas.y1 {
+                            let band = Rect::new(canvas.x0, y, canvas.x1, y.saturating_add(TILE_SIZE).min(canvas.y1));
+                            s.read_region_into(band, &mut vals);
+                            for px in vals.chunks_exact_mut(cc + 1) {
+                                let a = px[cc];
+                                for c in 0..cc {
+                                    px[c] = if a <= 0.0 { 0.0 } else { crate::pixels::unmatte(px[c], a, white[c]) };
+                                }
+                            }
+                            s.write_region(band, &vals);
+                            y = band.y1;
                         }
                     }
-                    s.write_region(band, &vals);
-                    y = band.y1;
+                    s.prune();
+                    let mut bg = Layer::new("Background", LayerContent::Raster(s));
+                    if alpha_idx.is_none() {
+                        bg.locks.transparency = true;
+                        bg.locks.position = true;
+                    }
+                    doc.layers.push(bg);
                 }
+                Err(e) => cx.report_limit_error(format!("merged image: {e}; treated as empty")),
             }
-            s.prune();
-            let mut bg = Layer::new("Background", LayerContent::Raster(s));
-            if alpha_idx.is_none() {
-                bg.locks.transparency = true;
-                bg.locks.position = true;
-            }
-            doc.layers.push(bg);
         }
     } else {
         if !file.layers().is_empty() {
@@ -785,11 +871,16 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = all.get(idx * plane..(idx + 1) * plane) else { break };
-            let mut s = Surface::new(cx.mask_fmt);
-            s.write_interleaved(canvas, &be_to_ne_plane(p, depth, n));
-            s.prune();
             let name = names.get(k).cloned().unwrap_or_else(|| format!("Alpha {}", k + 1));
-            doc.channels.push(AlphaChannel::new(name, s));
+            match be_to_ne_plane(p, depth, n) {
+                Ok(bytes) => {
+                    let mut s = Surface::new(cx.mask_fmt);
+                    s.write_interleaved(canvas, &bytes);
+                    s.prune();
+                    doc.channels.push(AlphaChannel::new(name, s));
+                }
+                Err(e) => cx.report_limit_error(format!("channel \"{name}\": {e}; not imported")),
+            }
         }
         // Channel options (overlay colour, opacity, colour indicates) and spot inks.
         if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
@@ -819,13 +910,13 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
         return None;
     }
     ctl.progress(1.0);
-    Some((doc, cx.warnings))
+    Some((doc, cx.warnings, cx.limit_error))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photocraft_psd::{Compression, LayerInfo, SectionType, Version};
+    use photocraft_psd::{ChannelData, Compression, LayerInfo, SectionType, Version};
 
     fn rec(name: &str, kind: Option<SectionType>) -> LayerRecord {
         let mut r = LayerRecord { name: name.as_bytes().to_vec(), ..Default::default() };
@@ -857,21 +948,32 @@ mod tests {
 
     #[test]
     fn layer_pixel_bytes_are_checked_and_budgeted() {
-        assert_eq!(checked_layer_pixel_bytes(2, 3, 4, 1), Ok(24));
+        assert_eq!(checked_layer_pixel_bytes(2, 3, 4, 1, MAX_LAYER_PIXEL_BYTES), Ok((6, 24)));
         // 100_000 x 100_000 RGBA8 would need 40 GB: rejected before allocation.
-        let err = checked_layer_pixel_bytes(100_000, 100_000, 4, 1).unwrap_err();
+        let err = checked_layer_pixel_bytes(100_000, 100_000, 4, 1, MAX_LAYER_PIXEL_BYTES).unwrap_err();
         assert!(err.contains("per-layer limit"), "{err}");
-        assert!(checked_layer_pixel_bytes(usize::MAX, 2, 4, 4).is_err());
-        assert_eq!(checked_import_total(0, MAX_IMPORT_PIXEL_BYTES), Ok(MAX_IMPORT_PIXEL_BYTES));
-        assert!(checked_import_total(MAX_IMPORT_PIXEL_BYTES, 1).is_err());
-        assert!(checked_import_total(usize::MAX, 1).is_err());
+        assert!(checked_layer_pixel_bytes(usize::MAX, 2, 4, 4, MAX_LAYER_PIXEL_BYTES).is_err());
+        assert_eq!(checked_import_total(0, MAX_IMPORT_PIXEL_BYTES, MAX_IMPORT_PIXEL_BYTES), Ok(MAX_IMPORT_PIXEL_BYTES));
+        assert!(checked_import_total(MAX_IMPORT_PIXEL_BYTES, 1, MAX_IMPORT_PIXEL_BYTES).is_err());
+        assert!(checked_import_total(usize::MAX, 1, MAX_IMPORT_PIXEL_BYTES).is_err());
+        // Five 8000x8000 16-bit RGBA layers (~2.56 GB total) fit well within the default 64-bit budget.
+        #[cfg(target_pointer_width = "64")]
+        {
+            let limits = PsdImportLimits::default();
+            let mut used = 0;
+            for _ in 0..5 {
+                let (_, layer_bytes) = checked_layer_pixel_bytes(8000, 8000, 4, 2, limits.max_layer_pixel_bytes).unwrap();
+                used = checked_import_total(used, layer_bytes, limits.max_import_pixel_bytes).unwrap();
+            }
+            assert_eq!(used, 5 * 8000 * 8000 * 4 * 2);
+        }
     }
 
     #[test]
     fn group_depth_is_capped() {
-        assert!(check_group_depth(0).is_ok());
-        assert!(check_group_depth(MAX_GROUP_DEPTH).is_ok());
-        assert!(check_group_depth(MAX_GROUP_DEPTH + 1).is_err());
+        assert!(check_group_depth(0, MAX_GROUP_DEPTH).is_ok());
+        assert!(check_group_depth(MAX_GROUP_DEPTH, MAX_GROUP_DEPTH).is_ok());
+        assert!(check_group_depth(MAX_GROUP_DEPTH + 1, MAX_GROUP_DEPTH).is_err());
     }
 
     #[test]
@@ -879,6 +981,10 @@ mod tests {
         let mut huge = rec("huge", None);
         huge.rect = photocraft_psd::Rect { top: 0, left: 0, bottom: 50_000, right: 50_000 };
         let file = file_with(vec![huge], 2, 2);
+        // `try_psd_to_document` (and `import`) returns an explicit error instead of silent data loss.
+        let err = try_psd_to_document(&file).unwrap_err();
+        assert!(err.to_string().contains("per-layer limit"), "{err}");
+        // Infallible helper records a warning and treats the layer as empty without panicking.
         let (doc, warnings) = psd_to_document(&file);
         assert_eq!(doc.layers.len(), 1);
         assert!(warnings.iter().any(|w| w.contains("per-layer limit")), "{warnings:?}");
@@ -889,7 +995,26 @@ mod tests {
     }
 
     #[test]
-    fn excessively_deep_groups_are_truncated_with_a_warning() {
+    fn configurable_import_limits_reject_when_exceeded_and_pass_when_raised() {
+        let mut layer = rec("a", None);
+        layer.rect = photocraft_psd::Rect { top: 0, left: 0, bottom: 4, right: 4 };
+        for id in [-1i16, 0, 1, 2] {
+            layer.channels.push(ChannelData { id, compression: Some(Compression::Raw), data: vec![128; 16] });
+        }
+        let file = file_with(vec![layer.clone(), layer], 4, 4);
+        // Each 4x4 RGBA8 layer is 64 bytes (128 bytes total). A 100-byte total limit rejects the second layer with `Err`.
+        let tight = PsdImportLimits { max_import_pixel_bytes: 100, ..PsdImportLimits::default() };
+        let err = try_psd_to_document_with_limits(&file, &photocraft_raster::Interrupt::NONE, &tight).unwrap_err();
+        assert!(err.to_string().contains("total import limit"), "{err}");
+        // Raising the limit allows both layers to import cleanly.
+        let generous = PsdImportLimits { max_import_pixel_bytes: 256, ..PsdImportLimits::default() };
+        let (doc, warnings) = try_psd_to_document_with_limits(&file, &photocraft_raster::Interrupt::NONE, &generous).unwrap().unwrap();
+        assert_eq!(doc.layers.len(), 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn excessively_deep_groups_are_truncated_or_rejected() {
         let depth = MAX_GROUP_DEPTH + 16;
         let mut records = Vec::new();
         for _ in 0..depth {
@@ -900,6 +1025,8 @@ mod tests {
             records.push(rec(&format!("g{i}"), Some(SectionType::OpenFolder)));
         }
         let file = file_with(records, 1, 1);
+        let err = try_psd_to_document(&file).unwrap_err();
+        assert!(err.to_string().contains("group nesting depth"), "{err}");
         let (doc, warnings) = psd_to_document(&file);
         assert!(warnings.iter().any(|w| w.contains("group nesting depth")), "{warnings:?}");
         assert!(imported_group_depth(&doc.layers) <= MAX_GROUP_DEPTH + 1, "imported depth {}", imported_group_depth(&doc.layers));

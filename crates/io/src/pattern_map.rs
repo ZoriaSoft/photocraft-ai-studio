@@ -69,7 +69,8 @@ pub fn from_psd(p: &PsdPattern) -> Option<Pattern> {
         fill.push(max_sample(s));
         invert.push(false);
     }
-    let mut bytes = interleave(&refs, &fill, w * h, s, &invert);
+    let pixel_count = w.checked_mul(h)?;
+    let mut bytes = interleave(&refs, &fill, pixel_count, s, &invert).ok()?;
     if mode == ColorMode::Lab && s == SampleType::U16 {
         crate::pixels::lab16_chroma(&mut bytes, refs.len(), true);
     }

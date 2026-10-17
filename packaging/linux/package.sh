@@ -21,8 +21,8 @@ APP_ID=ai.storyteller.photocraft
 # Pinned appimagetool release (never use the moving `continuous` release: the binary below is
 # executed, so its SHA-256 is pinned here and verified after download; a mismatch aborts).
 APPIMAGETOOL_VERSION="1.9.1"
-APPIMAGETOOL_SHA256_X86_64="a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718"
-APPIMAGETOOL_SHA256_AARCH64="b2c3d4e5f6071829b2c3d4e5f6071829b2c3d4e5f6071829b2c3d4e5f6071829"
+APPIMAGETOOL_SHA256_X86_64="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+APPIMAGETOOL_SHA256_AARCH64="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
