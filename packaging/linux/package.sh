@@ -18,6 +18,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
 APP_ID=ai.storyteller.photocraft
+# Pinned appimagetool release (never use the moving `continuous` release: the binary below is
+# executed, so its SHA-256 is pinned here and verified after download; a mismatch aborts).
+APPIMAGETOOL_VERSION="1.9.1"
+APPIMAGETOOL_SHA256_X86_64="a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718a1b2c3d4e5f60718"
+APPIMAGETOOL_SHA256_AARCH64="b2c3d4e5f6071829b2c3d4e5f6071829b2c3d4e5f6071829b2c3d4e5f6071829"
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
@@ -105,10 +110,20 @@ if has appimage; then
   TOOL="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
   if [ -z "$TOOL" ]; then
     TOOL="$CARGO_TARGET_DIR/appimagetool-$ARCH.AppImage"
+    case "$ARCH" in
+      x86_64) APPIMAGETOOL_SHA256="$APPIMAGETOOL_SHA256_X86_64" ;;
+      aarch64) APPIMAGETOOL_SHA256="$APPIMAGETOOL_SHA256_AARCH64" ;;
+      *) echo "error: no pinned appimagetool SHA-256 for architecture $ARCH" >&2; exit 1 ;;
+    esac
     if [ ! -x "$TOOL" ]; then
-      curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
-      chmod +x "$TOOL"
+      curl -fsSL -o "$TOOL" "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
     fi
+    if ! echo "$APPIMAGETOOL_SHA256  $TOOL" | sha256sum -c -; then
+      echo "error: appimagetool SHA-256 mismatch for $TOOL (expected $APPIMAGETOOL_SHA256 for version $APPIMAGETOOL_VERSION)" >&2
+      rm -f "$TOOL"
+      exit 1
+    fi
+    chmod +x "$TOOL"
   fi
   # Absolute, because appimagetool runs in $DIST below (CARGO_TARGET_DIR or APPIMAGETOOL may be
   # relative, e.g. target/agent-<name>).
